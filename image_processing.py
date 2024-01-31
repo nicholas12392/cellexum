@@ -31,7 +31,7 @@ out_path = '\\'.join(listed_path)
 data_files = [i for i in os.listdir(data_path) if i.split('.')[-1] == 'vsi']
 data_folders = [i.replace('.vsi', '') for i in data_files]
 force_pro = []  # set empty force processing list for later use
-ana_method = 1  # set initial analysis method to feature recognition
+ana_method = 0  # set initial analysis method to standard LFSR
 
 # progress check the script
 # check out path validity (if no such file, progress must be zero)
