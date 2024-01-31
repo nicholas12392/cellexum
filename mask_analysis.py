@@ -310,6 +310,7 @@ def preProcessImgs(data_folders, data_path, out_path, images, force_pro, ana_met
     global pbar
 
     out_dirs = []
+    ana_method = str(ana_method) if not isinstance(ana_method, str) else ana_method  # ensure the method is always keyed as a string
     methods = {'0':'LFSR', '0.1':'LFSR-SMF', '0.2':'LFSR-SA', '0.3':'LFSR-LEGACY', '1':'BSR', '2':'BSR-FS'}
     ANA_method = methods.get(ana_method)
     metadata_ids = ['PhysicalSizeX', 'PhysicalSizeY', 'PhysicalSizeXUnit', 'PhysicalSizeYUnit']
