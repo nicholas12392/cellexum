@@ -565,9 +565,7 @@ def arrayIdentification(img, md_scalar, **kwargs):
     best_guide_text = f'T{best_tolerance}: +/-{fa_error - worst_tolerance * 0.5:.1f}% ' \
                       f'Area; +/-{r_error / (worst_tolerance + 1):.3f} Ratio'
     if best_tolerance == worst_tolerance:
-        best_contours_text = [c for c in best_contours if __range_check__(c, c[0][0], 100, 'abs') and
-                              __range_check__(c, c[0][1], 100, 'abs')]
-        for c in best_contours_text:
+        for c in best_contours:
             __put_contour_text__(f'T{best_tolerance}', c, __BGR_colors__.get('pastelpurple'), 'best')
         __put_guide_text__(best_guide_text, (50, 120), __BGR_colors__.get('pastelpurple'))
     else:
