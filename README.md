@@ -77,6 +77,8 @@ without enhancements is always saved in the child directory for the current imag
   <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/06394c0b-d7a6-4db7-ba8a-7c6eb431c4b0"><br>
   Figure 9: <b>Created path and manual control file.</b>. Start by checking the overview mask, and if there is any doubt check the full resolution mask.
 </p>
+The meaning of T# is the measure of how strictly it was possible to fit the mask. This is measured in tolerance levels. The best tolerance is T0, which is the initial fit condition of an allowed error on the area of +/-3% and the height/width ratio of +/-0.001. Only contours that have more than 10% infill are saved. The T0 data will always be used to determine the angular correction of the masked arrays since the angular offset is most accurate the more precise the mask fits the arrays. If the T0 dataset contains less than 7 arrays, the script will up the tolerance with +/-0.5% area and +/-0.001 ratio and fit again. This will continue until the criteria is passed. The tolerance just above (or at) the criteria level, is then used to determine the average distance between arrays in the mask, to get the most accurate positional representation. Thus, in the control image, the green (left) tolerance is the best tolerance for which arrays could be fitted, which has been used to determine the angular offset, and the red (right) tolerance is the worst tolerance (or the criterium) tolerance used to fit the array positions.
+The determined field parameters signify the average pixel height and width of each array and 'A', the horizontal angular offset.
 
 ### LFSR Failure
 There are a few reasons for which LFSR might fail. If this occurs, the program will attempt to go through masking with BSR.
