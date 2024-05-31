@@ -4,6 +4,8 @@ The program is made to analyze images directly taken from an Olympus optical mic
 
 The detailed mechanics of the script can be found in [Technical Details](https://github.com/nicholas12392/cellexum#technical-details).
 
+If you have multiple python installations on your machine, you will have to edit the `python.exe` in the `RUN.bat` file to the path of your target python installation.
+
 ## Operating the Program
 The script consists of six different files that each have a specific function.
 <p align="center">
