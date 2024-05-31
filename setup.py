@@ -1,8 +1,8 @@
 import setuptools
 
 setuptools.setup(
-    name='NTSA Img Processing',
-    version='2',
+    name='cellexum',
+    version='1.0.1',
     author='Nicholas Hansen',
     author_email='nicholas.2000@live.dk',
     description='A specified pack of software designed to analyze NTSA surfaces.',
