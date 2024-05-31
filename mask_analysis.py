@@ -9,6 +9,32 @@ import tqdm
 import numpy as np
 
 # ::::: PROCESS : SEPARATING STRUCTURES
+def scaleBarGetter(folder):
+    """
+    For a .vsi folder, extracts scale bar data for associated metadata from microscoper.
+    :param folder: .vsi file folder
+    :return: The root-mean-square scale bar for the image as pixel/µm
+    """
+    # define metadata ids to look for and extract
+    metadata_ids = ['PhysicalSizeX', 'PhysicalSizeY', 'PhysicalSizeXUnit', 'PhysicalSizeYUnit']
+    metadata_scale = nsu.xml_extract(rf'{folder}\metadata.xml', metadata_ids)  # extract metadata
+    mds_list = [metadata_scale.get(s) for s in metadata_scale]  # get values
+    metadata_scale_tuple = ((1 / float(mds_list[0][0]), mds_list[2][0]),
+                            (1 / float(mds_list[1][0]), mds_list[3][0]))  # redefine result
+
+    unit_to_pixel = []  # has shape (height, width)
+    for md in metadata_scale_tuple:  # fix potential mm unit to µm
+        if md[1] == 'mm':
+            unit_to_pixel.append(md[0] * 10 ** 3)
+        else:
+            unit_to_pixel.append(md[0])
+            
+    # take the root-mean-square of the scale bars in x and y, and set as the image scale bar 
+    rms_scalebar = np.sqrt(np.square(unit_to_pixel[0]) + np.square(unit_to_pixel[1]))
+
+    return rms_scalebar
+
+
 def cutImgs(tbox, MF, GE, UV, out_dir):
 
     # sort the tbox coordinates prioritizing x-coordinate
