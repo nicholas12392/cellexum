@@ -87,7 +87,7 @@ def structureCellCount(img_path, df_col):
     # optimize each img for maximum cell count
     h, w = img.shape[0:2]
     img_area = h * w
-    int_fact = 6
+    int_fact = np.mean(b_img.flatten()) + 5  # set the starting intensity for cell counting to match the image noise
 
     # determine method employment by an initial cell count
     thresh_img = cv2.threshold(b_img, int_fact, 255, cv2.THRESH_BINARY)[1]  # set threshold to convert to binary
@@ -111,7 +111,7 @@ def structureCellCount(img_path, df_col):
     # ------ ILLUSTRATION
 
     if init_cell_count > 250:  # if the initial count is above 250 cells, used the HoughCircles method
-        thresh_img = cv2.threshold(b_img, 8, 255, cv2.THRESH_BINARY)[1]  # set threshold to convert to binary
+        thresh_img = cv2.threshold(b_img, int_fact + 3, 255, cv2.THRESH_BINARY)[1]  # set threshold to convert to binary
         _ones = sum([len([j for j in i if j == 255]) for i in thresh_img])  # find all binary ones in the image
         _canny = cv2.Canny(thresh_img, 100, 200)  # use Canny edge detection on image
 
