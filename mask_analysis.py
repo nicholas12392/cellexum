@@ -8,12 +8,24 @@ import time
 import tqdm
 import numpy as np
 
+
+def __time_print__(text):
+    """
+    Print the time in front of the printed message.
+    :param text: The text to be printed.
+    :return: Prints the text along with the current time.
+    """
+    time_stamp = time.localtime()
+    print()
+    print(f'{time.strftime("%H:%M", time_stamp)} - {text}')
+
+
 # ::::: PROCESS : SEPARATING STRUCTURES
 def scaleBarGetter(folder):
     """
     For a .vsi folder, extracts scale bar data for associated metadata from microscoper.
     :param folder: .vsi file folder
-    :return: The root-mean-square scale bar for the image as pixel/µm
+    :return: The mean scale bar for the image as pixel/µm
     """
     # define metadata ids to look for and extract
     metadata_ids = ['PhysicalSizeX', 'PhysicalSizeY', 'PhysicalSizeXUnit', 'PhysicalSizeYUnit']
@@ -26,13 +38,17 @@ def scaleBarGetter(folder):
     for md in metadata_scale_tuple:  # fix potential mm unit to µm
         if md[1] == 'mm':
             unit_to_pixel.append(md[0] * 10 ** 3)
+        elif md[1] == 'cm':
+            unit_to_pixel.append(md[0] * 10 ** 4)
+        elif md[1] == 'm':
+            unit_to_pixel.append(md[0] * 10 ** 6)
         else:
             unit_to_pixel.append(md[0])
-            
-    # take the root-mean-square of the scale bars in x and y, and set as the image scale bar 
-    rms_scalebar = np.sqrt(np.square(unit_to_pixel[0]) + np.square(unit_to_pixel[1]))
 
-    return rms_scalebar
+    # take the mean of the scale bars in x and y, and set as the image scale bar
+    mean_scalebar = np.mean(unit_to_pixel)
+
+    return mean_scalebar
 
 
 def cutImgs(tbox, MF, GE, UV, out_dir):
@@ -84,6 +100,7 @@ def cutImgs(tbox, MF, GE, UV, out_dir):
     sbar.refresh()
     return
 
+
 def removeCommonWords(*snippets):
     # fix list input to expected structure
     if not isinstance(snippets[0], str):
@@ -105,115 +122,92 @@ def removeCommonWords(*snippets):
     return resolved_snippets
 
 
-def structureCellCount(img_path, df_col):
+def structureCellCount(img_path, df_col, scale_bar):
     img = cv2.imread(img_path)  # load image from path
     gs_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # fix image color interpretation
-    b_img = cv2.GaussianBlur(gs_img, (3, 3), 2, 2)
+    bg_img = cv2.medianBlur(gs_img, ksize=101)  # determine the background with a large kernel
+    b_img = cv2.subtract(gs_img, bg_img)  # subtract the background from the grayscale image
 
     # optimize each img for maximum cell count
     h, w = img.shape[0:2]
-    img_area = h * w
-    int_fact = np.mean(b_img.flatten()) + 5  # set the starting intensity for cell counting to match the image noise
+    img_ints = b_img.flatten()  # create a list consisting of all intensities for all pixels in the image
+    img_int_max = max(img_ints)  # find the maximum pixel intensity in the image
+    t_min = np.mean(img_ints, dtype=int) + 5  # set the starting intensity for cell counting to match the image noise
+
+    # set a range for the nuclei radius in pixels and area in pixels^2
+    nuclei_radius = np.array([5, 27]) * scale_bar  # the nuclei real size is assumed to be from 5 µm to 27 µm
+    nuclei_area = np.square(nuclei_radius) * np.pi
+    na_min, na_max = nuclei_area[0], nuclei_area[-1]  # unpack min and max nuclei area
+    edge = int(50 * scale_bar)  # define the 50 µm field edge size in pixels
 
     # determine method employment by an initial cell count
-    thresh_img = cv2.threshold(b_img, int_fact, 255, cv2.THRESH_BINARY)[1]  # set threshold to convert to binary
+    thresh_img = cv2.threshold(b_img, t_min, 255, cv2.THRESH_BINARY)[1]  # set threshold to convert to binary
     cnt = cv2.findContours(thresh_img, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)[0]  # find contours
-    init_cell_count = len([c for c in cnt if img_area * 0.00002 < cv2.contourArea(c) < img_area * 0.0005])
+    init_cell_count = len([c for c in cnt if na_min < cv2.contourArea(c) < na_max])
 
-    # ------ ILLUSTRATION
-    if '_04_2;0.8.tiff' in img_path:
-        __illustration__ = False
-    else:
-        __illustration__ = False
-    __ill_folder__ = r'C:\Users\nicho\OneDrive - Aarhus Universitet\8SEM\Project in Nanoscience\PowerPoint\Python and NTSAs\cellCount'
-
-    fr.__write_img__(img, 'init', img_folder=__ill_folder__, write=__illustration__)
-    fr.__write_img__(b_img, 'blur', img_folder=__ill_folder__, write=__illustration__)
-    fr.__write_img__(thresh_img, 'thresh', img_folder=__ill_folder__, write=__illustration__)
-    fr.__write_img__(img, 'init_count', img_folder=__ill_folder__, write=__illustration__, c=[c for c in cnt if img_area * 0.00002 < cv2.contourArea(c) < img_area * 0.0005], cc='cyan', ct=2)
-
-    if __illustration__:
-        print(f'Initial Cell Count: {init_cell_count}')
-    # ------ ILLUSTRATION
-
-    if init_cell_count > 250:  # if the initial count is above 250 cells, used the HoughCircles method
-        thresh_img = cv2.threshold(b_img, int_fact + 3, 255, cv2.THRESH_BINARY)[1]  # set threshold to convert to binary
-        _ones = sum([len([j for j in i if j == 255]) for i in thresh_img])  # find all binary ones in the image
+    if not init_cell_count:  # if the initial count is above 250 cells, used the HoughCircles method
+        thresh_img = cv2.threshold(b_img, t_min, 255, cv2.THRESH_BINARY)[1]  # set threshold to convert to binary
+        _ones = np.where(thresh_img.flatten() == 255)[0].size  # find all binary ones in the image
         _canny = cv2.Canny(thresh_img, 100, 200)  # use Canny edge detection on image
-
-        # ------ ILLUSTRATION
-        fr.__write_img__(_canny, 'canny', img_folder=__ill_folder__, write=__illustration__)
-        # ------ ILLUSTRATION
-
-        # determine radii range for HoughCircles detection through the image size
-        radii_range = [int((img_area * i / np.pi) ** 1 / 2) for i in (0.00001, 0.000085)]
 
         int_dp = 1  # set initial inverse ratio of accumulator resolution
         cell_counts = []
         int_dps = []
         while int_dp < 10:  # iterate over increasing dp until limit
             circles = cv2.HoughCircles(_canny, cv2.HOUGH_GRADIENT, int_dp, 1,
-                                       param1=50, param2=28, minRadius=radii_range[0], maxRadius=radii_range[1])
+                                       param1=50, param2=28, minRadius=nuclei_radius[0], maxRadius=nuclei_radius[1])
             if circles is not None:
                 cells = len(circles[0])
                 cell_counts.append(cells)
                 int_dps.append(int_dp)
             int_dp += 0.05
 
-        if __illustration__:
-            print(int_dps)
-            print(cell_counts)
-
         max_cell_count = max(cell_counts)  # find max cell count from iterations
         found_dp = int_dps[cell_counts.index(max_cell_count)]  # determine optimum dp from cell count max
 
         # re-calculate from the found parameters to get cell positions
         found_cells = cv2.HoughCircles(_canny, cv2.HOUGH_GRADIENT, found_dp, 1,
-                                   param1=50, param2=28, minRadius=radii_range[0], maxRadius=radii_range[1])[0]
+                                   param1=50, param2=28, minRadius=nuclei_radius[0], maxRadius=nuclei_radius[1])[0]
 
     else:
-        cell_counts = []
-        contours = []
-        while int_fact < 255:
+        cell_counts, contours, t_mins = [], [], []
+        while t_min < img_int_max:
             if len(cell_counts) > 1:
-                if max(cell_counts) - cell_counts[-1] > 100:
+                if cell_counts[-1] / max(cell_counts) < 0.5:
                     break
                 else:
                     pass
-            thresh_img = cv2.threshold(b_img, int_fact, 255, cv2.THRESH_BINARY)[1]  # set threshold to convert to binary
+            thresh_img = cv2.threshold(b_img, t_min, 255, cv2.THRESH_BINARY)[1]  # set threshold to convert to binary
             cnt = cv2.findContours(thresh_img, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)[0]  # find contours
-            cnt = [c for c in cnt if img_area * 0.00002 < cv2.contourArea(c) < img_area * 0.0005]
-            cell_counts.append(len(cnt)), contours.append(cnt)
-            int_fact += 1
+            cnt = [c for c in cnt if na_min < cv2.contourArea(c) < na_max]
+            cell_counts.append(len(cnt)), contours.append(cnt), t_mins.append(t_min)
+            t_min += 1
+            na_min *= 0.965  # lower nuclei min area by 3.5% for each iteration to account for apparent cell shrinkage
+            na_max *= 0.985  # lower nuclei max area by 1.5% for each iteration to account for apparent cell shrinkage
 
-        _ones = sum([len([j for j in i if j == 255]) for i in thresh_img])  # find all binary ones in the image
-        found_cnt = contours[cell_counts.index(max(cell_counts))]  # find contours for max cell count
+        max_count_id = np.where(np.array(cell_counts) == max(cell_counts))[0][-1]
+        found_cnt = contours[max_count_id]  # find contours for max cell count
         found_cells_dim = [cv2.minEnclosingCircle(c) for c in found_cnt]  # approximate contours to circles
         found_cells = [[cX, cY, r] for ((cX, cY), r) in found_cells_dim]  # fix list structure
 
-        # ------ ILLUSTRATION
-        if __illustration__:
-            print(cell_counts)
-            fr.__write_img__(thresh_img, 'final_thresh', img_folder=__ill_folder__, write=__illustration__)
-        # ------ ILLUSTRATION
-
+        # determine the optimal threshold image and cut it down to 2x2 mm^2
+        thresh_img = cv2.threshold(b_img, t_mins[max_count_id], 255, cv2.THRESH_BINARY)[1][edge:w-edge, edge:h-edge]
+        _ones = np.where(thresh_img.flatten() == 255)[0].size  # find all binary ones in the image
 
     filter_cell_count = 0
     for cX, cY, r in found_cells:
 
-        # filter away cells near edges (cuts away if the cell is an entire cell radius or less outside the border)
-        cSize = r / 0.22
-        if cY - cSize > 0 and cX - cSize > 0 and cY + cSize < h and cX + cSize < w:
-            if init_cell_count > 250:
+        # filter away cells if their center is within the outer 50 µm edges of the field
+        if edge < cY < h - edge and edge < cX < w - edge:
+            if not init_cell_count:
                 cv2.circle(img, (int(cX), int(cY)), int(r), (0, 255, 0), 1)
             else:
                 cv2.circle(img, (int(cX), int(cY)), int(r), (0, 0, 255), 1)
             filter_cell_count += 1
 
-    rel_cell_size = 1e-04  # set relative cell area compared to entire image
-
-    avr_area = rel_cell_size * img_area
-    area_cell_count = int(_ones / avr_area)  # estimate cell count by using binary area
+    # mean_nuclei_area = np.mean(nuclei_area)  # set the mean nuclei area from scale bar
+    mean_nuclei_area = np.mean(np.square(list(zip(*found_cells))[-1]) * np.pi)  # set the mean nuclei area from mean contour
+    area_cell_count = int(_ones / mean_nuclei_area)  # estimate cell count by using binary area
 
     # construct output path
     split_path = img_path.split('\\')
@@ -226,11 +220,6 @@ def structureCellCount(img_path, df_col):
     # construct specific file path
     out_file_path = out_dir_path + r'\ '.replace(' ', '') + split_path[-1].split('.tiff')[0] + '_UV_processed.tiff'
     cv2.imwrite(out_file_path, img)
-
-    # ------ ILLUSTRATION
-    if __illustration__:
-        print(f'Final Cell Count: {filter_cell_count}')
-    # ------ ILLUSTRATION
 
     # pack result in DataFrame
     row_name = ' '.join(split_path[-1].split('.tiff')[0].split('_')[1:])
@@ -336,34 +325,21 @@ def preProcessImgs(data_folders, data_path, out_path, images, force_pro, ana_met
     global pbar
 
     out_dirs = []
-    ana_method = str(ana_method) if not isinstance(ana_method, str) else ana_method  # ensure the method is always keyed as a string
+    ana_method = str(ana_method) if not isinstance(ana_method, str) else ana_method
     methods = {'0':'LFSR', '0.1':'LFSR-SMF', '0.2':'LFSR-SA', '0.3':'LFSR-LEGACY', '1':'BSR', '2':'BSR-FS'}
     ANA_method = methods.get(ana_method)
-    metadata_ids = ['PhysicalSizeX', 'PhysicalSizeY', 'PhysicalSizeXUnit', 'PhysicalSizeYUnit']
+
+    scale_bars = []
     for file in data_folders:
         vsi_dir = rf'{data_path}\_{file}_'  # set .vsi folder directory
-        metadata_scale = nsu.xml_extract(rf'{vsi_dir}\metadata.xml', metadata_ids)
-        mds_list = [metadata_scale.get(s) for s in metadata_scale]
-        metadata_scale_tuple = ((1 / float(mds_list[0][0]), mds_list[2][0]),
-                                (1 / float(mds_list[1][0]), mds_list[3][0]))
-
-        # normalize scalebar to meters
-        norm_scale = []
-        for t in metadata_scale_tuple:
-            if t[1] == 'µm':
-                norm_scale.append(t[0] / 10e-6)
-            elif t[1] == 'mm':
-                norm_scale.append(t[0] / 10e-3)
-            else:
-                norm_scale.append(t[0])
+        _scale_bar = scaleBarGetter(vsi_dir)
+        scale_bars.append(_scale_bar)
 
         out_dir = rf'{out_path}\{file}'
         out_dirs.append(out_dir)
         if not all(os.path.isfile(out_dir + r'{}\_64_C.tiff'.format(i.split('.')[0])) for i in
                    images) or file in force_pro:
-            time_stamp = time.localtime()
-            print()
-            print(f'{time.strftime("%H:%M", time_stamp)} - PRE-PROCESSING ({ANA_method}): {file}')
+            __time_print__(f'PRE-PROCESSING ({ANA_method}): {file}')
 
             pbar = tqdm.tqdm(total=6, desc='Loading Images')
             gs_img, MF_img, GE_img, UV_img = loadImgs(vsi_dir, images, gs_out=True)
@@ -374,33 +350,31 @@ def preProcessImgs(data_folders, data_path, out_path, images, force_pro, ana_met
                     force_square = True
                 else:
                     force_square = False
-                brightSpotRecognition(cv2_images, out_dir, norm_scale, force_square)
+                brightSpotRecognition(cv2_images, out_dir, _scale_bar, force_square)
             elif ana_method in ('0', '0.1', '0.2', '0.3'):
                 try:
                     if angle_max_fields:
-                        featureRecognition(cv2_images, out_dir, norm_scale, angle_max_fields=angle_max_fields)
+                        featureRecognition(cv2_images, out_dir, _scale_bar, angle_max_fields=angle_max_fields)
                     elif fixed_best_angle:
-                        featureRecognition(cv2_images, out_dir, norm_scale, fixed_best_angle=fixed_best_angle)
+                        featureRecognition(cv2_images, out_dir, _scale_bar, fixed_best_angle=fixed_best_angle)
                     else:
-                        featureRecognition(cv2_images, out_dir, norm_scale)
+                        featureRecognition(cv2_images, out_dir, _scale_bar)
                 except fr.GaussianMixtureFailure:
                     print('LFSR clustering failed, attempting BSR instead')
                     pbar = tqdm.tqdm(total=6, desc='Loading Images')
                     pbar.update(1)
-                    brightSpotRecognition(cv2_images, out_dir, norm_scale)
-    return out_dirs
+                    brightSpotRecognition(cv2_images, out_dir, _scale_bar)
+    return out_dirs, scale_bars
 
 
 # count cells in the cut DAPI images (DATA EXTRACTION)
-def processImgs(data_folders, out_dirs, out_path):
-    # sample_names = [i.replace(' -', '') for i in removeCommonWords(data_folders)]
+def processImgs(data_folders, out_dirs, out_path, scale_bars):
     sample_set_df, sample_set_df_area = pd.DataFrame(), pd.DataFrame()  # create empty DataFrame to append to
-    time_stamp = time.localtime()
-    print()
-    print(f'{time.strftime("%H:%M", time_stamp)} - DETERMINING CELL COUNT FOR STRUCTURES')
+    __time_print__('DETERMINING CELL COUNT FOR STRUCTURES')
+
     N_files = len(data_folders)
     pbar = tqdm.tqdm(total=N_files)
-    for op, sample_name in zip(out_dirs, data_folders):
+    for op, sample_name, _sb in zip(out_dirs, data_folders, scale_bars):
         pbar.set_description(sample_name)
 
         # check files in UV file path
@@ -415,7 +389,7 @@ def processImgs(data_folders, out_dirs, out_path):
         for UV_file in UV_files:
             sbar.set_description(f' >>>   {UV_file[1:-5].replace("_", " ")}')
             UV_path = rf'{UV_img_path}\{UV_file}'  # find true file path
-            cell_df, cell_df_area = structureCellCount(UV_path, sample_name)
+            cell_df, cell_df_area = structureCellCount(UV_path, sample_name, _sb)
             loop_df, loop_df_area = pd.concat([loop_df, cell_df]), pd.concat([loop_df, cell_df_area])
             sbar.update(1)
         sample_set_df, sample_set_df_area = pd.concat([sample_set_df, loop_df], axis=1), pd.concat([
