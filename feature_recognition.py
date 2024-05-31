@@ -1,5 +1,4 @@
 import time
-
 from numpy import unique
 from numpy import where
 import numpy as np
@@ -116,8 +115,7 @@ def identifyMarkerCluster(img, md_scalar):
     :return: Contours mapping for the cluster
     """
 
-    mean_scale = np.mean(md_scalar)  # find mean scale from x and y scalebar
-    field_len = 2.1 * 10e-3 * mean_scale
+    field_len = 2.1e3 * md_scalar
     field_area = field_len ** 2
 
     g_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # convert image to grayscale
@@ -125,14 +123,6 @@ def identifyMarkerCluster(img, md_scalar):
     # sharpen the image to enhance features
     sharpen_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
     s_img = cv2.filter2D(g_img, -1, sharpen_kernel)
-
-    # ------ ILLUSTRATION
-    __illustration__ = False
-    __ill_folder__ = r'C:\Users\nicho\OneDrive - Aarhus Universitet\8SEM\Project in Nanoscience\PowerPoint\Python and NTSAs\LFSR_imgs'
-    __write_img__(img, 'init', img_folder=__ill_folder__, write=__illustration__)
-    __write_img__(s_img, 'sharp1', img_folder=__ill_folder__, write=__illustration__)
-    # ------ ILLUSTRATION
-
     sharpen_kernel = np.array([[-1, -1, -1], [-1, 7, -1], [-1, -1, -1]])
     s_img = cv2.filter2D(s_img, -1, sharpen_kernel)
 
@@ -144,27 +134,12 @@ def identifyMarkerCluster(img, md_scalar):
     morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     morph_img = cv2.morphologyEx(t_img, cv2.MORPH_CLOSE, morph_kernel, iterations=4)
 
-    # ------ ILLUSTRATION
-    __write_img__(s_img, 'sharp2', img_folder=__ill_folder__, write=__illustration__)
-    __write_img__(t_img, 'thresh', img_folder=__ill_folder__, write=__illustration__)
-    __write_img__(morph_img, 'morph', img_folder=__ill_folder__, write=__illustration__)
-    # ------ ILLUSTRATION
-
     # find the large marker
     cont = cv2.findContours(morph_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
 
-    # ------ ILLUSTRATION
-    __write_img__(morph_img, 'all_count', img_folder=__ill_folder__, write=__illustration__, c=cont, cc='green', ct=50)
-    # ------ ILLUSTRATION
 
     # filter all contours for squares that fit the array dimensions
-    # cont = [markSquare(c) for c in cont if 5 * 10 ** 6 > cv2.contourArea(c) > 3 * 10 ** 5]
     cont = [markSquare(c) for c in cont if __range_check__(cv2.contourArea(c), field_area, 15, 'rel')]
-
-    # ------ ILLUSTRATION
-    __write_img__(morph_img, 'all_squares', img_folder=__ill_folder__, write=__illustration__, c=cont, cc='yellow',
-                  ct=50)
-    # ------ ILLUSTRATION
 
     # filter for the most filled squares
     cnt, cnt_prop = [], []
@@ -179,11 +154,6 @@ def identifyMarkerCluster(img, md_scalar):
             if avg_color > 0.35 * 255:
                 cnt.append(c)
                 cnt_prop.append((x, y, w, h))
-
-    # ------ ILLUSTRATION
-    __write_img__(morph_img, '35pct_squares', img_folder=__ill_folder__, write=__illustration__, c=cont, cc='cyan',
-                  ct=50)
-    # ------ ILLUSTRATION
 
     # attempt to identify the amount of clusters in image
     # this step should not make any sense
@@ -221,14 +191,6 @@ def identifyMarkerCluster(img, md_scalar):
     clust_size = [len(i) for i in clusters]  # find cluster sizes
     clust_marker = clusters[clust_size.index(max(clust_size))]  # find square ids for the largest cluster
     cnt = [cnt[i] for i in clust_marker]  # filter the contours to only be the largest cluster
-
-    # temp_path = r"C:\Users\nicho\OneDrive - Aarhus Universitet\6SEM\Bachelor\Report\v2\graphics\raster"
-    # out_img = cv2.cvtColor(morph_img.copy(), cv2.COLOR_GRAY2BGR)
-    # cv2.drawContours(out_img, cnt, -1, (0, 0, 255), 40)
-    # scale = 50
-    # resized = cv2.resize(out_img, (int(out_img.shape[1] * scale / 100), int(out_img.shape[0] * scale / 100)),
-    #                      interpolation=cv2.INTER_AREA)
-    # cv2.imwrite(temp_path + r'\gaussianClustering.png', resized)
 
     return cnt
 
@@ -366,22 +328,14 @@ def arrayIdentification(img, md_scalar, **kwargs):
     :return:
     """
 
-    # define NTSA parameters from metadata scalar
-    mean_scale = np.mean(md_scalar)  # find mean scale from x and y scalebar
-    NTSA_len = 20 * 10e-3 * mean_scale
-    field_len = 2.1 * 10e-3 * mean_scale
+    # define NTSA parameters from metadata scalar (scale bar is in pixel/µm)
+    NTSA_len = 20e3 * md_scalar
+    field_len = 2.1e3 * md_scalar
     field_area = field_len ** 2
-    field_sep = .4 * 10e-3 * mean_scale
+    field_sep = .4e3 * md_scalar
 
     g_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # convert grayscale
     blur_img = cv2.medianBlur(g_img, 5)  # blur the image to enhance entire-array identification
-
-    # ------ ILLUSTRATION
-    __illustration__ = False
-    __ill_folder__ = r'C:\Users\nicho\OneDrive - Aarhus Universitet\8SEM\Project in Nanoscience\PowerPoint\Python and NTSAs\arrayID'
-    __write_img__(img, 'init', img_folder=__ill_folder__, write=__illustration__)
-    __write_img__(blur_img, 'blur', img_folder=__ill_folder__, write=__illustration__)
-    # ------ ILLUSTRATION
 
     def __contour_detect__(gs_range):
         thresh_img = cv2.threshold(blur_img, gs_range[0], gs_range[1], cv2.THRESH_BINARY_INV)[1]  # convert to binary
@@ -408,37 +362,7 @@ def arrayIdentification(img, md_scalar, **kwargs):
             if __range_check__(c_area, field_area, 15, 'rel') and __range_check__(c_ratio, 1, 0.02, 'abs'):
                 cnt.append((c, c_area, c_ratio))
                 print_cnt.append(c)
-        # ------ ILLUSTRATION
-        __write_img__(morph_img, f'_whites_{gs_range[0]}_{gs_range[1]}', img_folder=__ill_folder__, write=__illustration__, c=print_cnt,
-                      cc='yellow',
-                      ct=50)
-        # ------ ILLUSTRATION
-
         return cnt, col_ratio
-
-    # def detectArrays(img, gs_range, ratio_extend=0.001, area_extend=0.5):
-    #     """
-    #     This sub-function is designed to detect the arrays
-    #     :param img: image for detection
-    #     :param gs_range: grayscale range to use for detection
-    #     :return:
-    #     """
-    #
-    #     thresh_img = cv2.threshold(img, gs_range[0], gs_range[1], cv2.THRESH_BINARY_INV)[1]  # set initial threshold
-    #     morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))  # define morphology kernel
-    #     morph_img = cv2.morphologyEx(thresh_img, cv2.MORPH_CLOSE, morph_kernel,
-    #                                  iterations=2)  # apply morphology to threshold
-    #     cont = cv2.findContours(morph_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
-    #
-    #     cnt = []
-    #     for c in cont:
-    #         x, y, w, h = cv2.boundingRect(c)
-    #         cArea = cv2.contourArea(c)
-    #
-    #         # find squares by matching height and width ratio
-    #         if __range_check__(cArea, field_area, area_extend, 'rel') and __range_check__(w / h, 1, ratio_extend, 'abs'):
-    #             cnt.append(markSquare(c))
-    #     return cnt, morph_img, thresh_img
 
     g_range = np.array([0, 15])  # set initial grayscale range fraction
     if 'angle_max_fields' in kwargs.keys():
@@ -485,47 +409,6 @@ def arrayIdentification(img, md_scalar, **kwargs):
             fa_error += .5
             r_error += .001
 
-    # # optimize contours till arrays are identified
-    # while not contour:
-    #     # cv2.imshow("pros_img", cv2.resize(pros_img, (int(pros_img.shape[1] * 10 / 100), int(pros_img.shape[0] * 10 / 100)),
-    #     #                   interpolation=cv2.INTER_AREA))
-    #     # cv2.waitKey(0)
-    #
-    #     # redo array detection
-    #     start = time.time()
-    #     contour, pros_img, thresh_img = detectArrays(blur_img, g_range, area_extend=4.5 + 0.5 * ext_factor,
-    #                                                  ratio_extend=0.001 * ext_factor)
-    #     end = time.time()
-    #     print(f'{end - start=}')
-    #
-    #     # ------ ILLUSTRATION
-    #     if g_range[0] in (0, 5, 10, 15, 50, 100, 150, 200, 240):
-    #         __write_img__(pros_img, f'morph_range{g_range[0]}_{g_range[1]}', img_folder=__ill_folder__,
-    #                       write=__illustration__)
-    #     # ------ILLUSTRATION
-    #
-    #     # determine amount of coloured pixels compared to black pixels
-    #
-    #     avg_color_per_row = np.average(pros_img, axis=0)
-    #     avg_color = np.average(avg_color_per_row, axis=0)
-    #     _whites = avg_color / g_range[1]
-    #
-    #     # if the end is reached and no contours have been found, try again with broader thresholds
-    #     if g_range[1] > 255 or _whites > .9:
-    #         ext_factor += 1  # extend ratio range
-    #         g_range = np.array([0, 15])  # reset intensity scale
-    #     else:
-    #         g_range += 1
-
-    # # ------ ILLUSTRATION
-    # __write_img__(pros_img, f'morph_range{g_range[0]}_{g_range[1]}', img_folder=__ill_folder__, write=__illustration__)
-    # __write_img__(pros_img, f'morph_cont_range{g_range[0]}_{g_range[1]}', img_folder=__ill_folder__,
-    #               write=__illustration__, c=contour, cc='green', ct=50)
-    # __write_img__(thresh_img, f'thresh_range{g_range[0]}_{g_range[1]}', img_folder=__ill_folder__,
-    #               write=__illustration__)
-    # ill_img = img.copy()
-    # # ------ ILLUSTRATION
-
     def __put_contour_text__(text, cnt, col, type, fs=4, tt=3):
         x, y = cv2.boundingRect(cnt)[:2]
         if type == 'best':
@@ -551,20 +434,11 @@ def arrayIdentification(img, md_scalar, **kwargs):
     high_tol_count = [len(i) for i in high_tol_conts]
     worst_contours = high_tol_conts[high_tol_count.index(max(high_tol_count))]
 
-    # ------ ILLUSTRATION
-    __write_img__(img.copy(), f'_best', img_folder=__ill_folder__,
-                  write=__illustration__, c=best_contours,
-                  cc='pastelgreen',
-                  ct=50)
-    __write_img__(img.copy(), f'_worst', img_folder=__ill_folder__, write=__illustration__,
-                  c=worst_contours,
-                  cc='pastelred',
-                  ct=50)
-    # ------ ILLUSTRATION
-
     best_guide_text = f'T{best_tolerance}: +/-{fa_error - worst_tolerance * 0.5:.1f}% ' \
                       f'Area; +/-{r_error / (worst_tolerance + 1):.3f} Ratio'
     if best_tolerance == worst_tolerance:
+        # best_contours_text = [c for c in best_contours if __range_check__(c, c[0][0], 100, 'abs') and
+        #                       __range_check__(c, c[0][1], 100, 'abs')]
         for c in best_contours:
             __put_contour_text__(f'T{best_tolerance}', c, __BGR_colors__.get('pastelpurple'), 'best')
         __put_guide_text__(best_guide_text, (50, 120), __BGR_colors__.get('pastelpurple'))
@@ -577,11 +451,6 @@ def arrayIdentification(img, md_scalar, **kwargs):
         worst_guide_text = f'T{worst_tolerance}: +/-{fa_error:.1f}% Area; +/-{r_error:.3f} Ratio'
         __put_guide_text__(worst_guide_text, (2000, 120), __BGR_colors__.get('pastelred'))
 
-        # [cv2.circle(img, cv2.boundingRect(c)[:2], 40, __BGR_colors__.get('magenta'), 3) for c in _field_maps[0][1]]
-
-    # # ------ ILLUSTRATION
-    # __write_img__(ill_img, 'found_square', img_folder=__ill_folder__, write=True, c=contour, cc='magenta', ct=50)
-    # # ------ ILLUSTRATION
 
     def __find_box_parameters__(contour):
         x_box, y_box = np.transpose(contour)  # separate box coordinates
@@ -651,9 +520,6 @@ def arrayIdentification(img, md_scalar, **kwargs):
     row_box = pos_row_box + neg_row_box[1:]
     cv2.drawContours(img, row_box, -1, __BGR_colors__.get('pastelcyan'), 2)  # draw the masked row
 
-    # # ------ ILLUSTRATION
-    # __write_img__(ill_img, 'init_row', img_folder=__ill_folder__, write=True, c=row_box, cc='cyan', ct=50)
-    # # ------ ILLUSTRATION
 
     # compute field separation correction from the actual mask row length and redo the linear mask
     """Note here that the true dimensions of the NTSA are the following. Each field is 2.1 mm x 2.1 mm with a .2 mm 
@@ -680,11 +546,6 @@ def arrayIdentification(img, md_scalar, **kwargs):
 
     # draw contours on the image for mapping
     cv2.drawContours(img, tbox, -1, __BGR_colors__.get('pastelyellow'), 2)
-
-    # # ------ ILLUSTRATION
-    # __write_img__(ill_img, 'final_row', img_folder=__ill_folder__, write=True, c=row_box, cc='yellow', ct=50)
-    # __write_img__(ill_img, 'full_mask', img_folder=__ill_folder__, write=True, c=tbox, cc='yellow', ct=50)
-    # # ------ ILLUSTRATION
 
     return img, tbox
 
