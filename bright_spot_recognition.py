@@ -14,19 +14,10 @@ import feature_recognition as fr
 # ::::: PROCESS : ADJUSTING GRAYSCALE MINIMUM INTENSITY
 def adjustGrayscale(img, md_scalar):
 
-    mean_scale = np.mean(md_scalar)  # find mean scale from x and y scalebar
-    field_len = 2.1 * 10e-3 * mean_scale
-    field_area = field_len ** 2
+    field_len = 2.1e3 * md_scalar  # find pixel size of a 2.1 mm field (scalebar is in pixel/µm)
+    field_area = field_len ** 2  # find pixel are of a field
 
     blur_img = cv2.medianBlur(img, 5) # blur image to remove noise
-
-
-    # ------ ILLUSTRATION
-    __illustration__ = False
-    __ill_folder__ = r'C:\Users\nicho\OneDrive - Aarhus Universitet\8SEM\Project in Nanoscience\PowerPoint\Python and NTSAs\BSR_imgs'
-    fr.__write_img__(img, 'init', img_folder=__ill_folder__, write=__illustration__)
-    fr.__write_img__(blur_img, 'medianBlur', img_folder=__ill_folder__, write=__illustration__)
-    # ------ ILLUSTRATION
 
     morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))  # define morphology kernel
 
@@ -57,34 +48,9 @@ def adjustGrayscale(img, md_scalar):
                 if fr.__range_check__(cArea, field_area, 15, 'rel'):
                     it_thresh.append(cArea)
 
-        # ------ ILLUSTRATION
-        if __illustration__ and low_lim in (254, 45, 42):
-            fr.__write_img__(morph_img, f'int_{low_lim}', img_folder=__ill_folder__, write=__illustration__, c=cnt,
-                             cc='green', ct=50)
-        # ------ ILLUSTRATION
-
     # set the contour to be the threshold value
 
-    # ------ ILLUSTRATION
-    fr.__write_img__(morph_img, f'int_{low_lim}_all', img_folder=__ill_folder__, write=__illustration__, c=cnt, cc='green',
-                  ct=50)
-    fr.__write_img__(thresh_img, f'int_{low_lim}_tresh', img_folder=__ill_folder__, write=__illustration__)
-    fr.__write_img__(morph_img, f'int_{low_lim}_morph', img_folder=__ill_folder__, write=__illustration__)
-    # ------ ILLUSTRATION
-
     cnt = cnt[[cv2.contourArea(c) for c in cnt].index(it_thresh[0])]
-    # temp_path = r"C:\Users\nicho\OneDrive - Aarhus Universitet\6SEM\Bachelor\Report\v3\graphics\raster"
-    # out_img = cv2.cvtColor(morph_img.copy(), cv2.COLOR_GRAY2BGR)
-    # cv2.drawContours(out_img, [cnt], -1, (255, 0, 0), 40)
-    # scale = 10
-    # resized = cv2.resize(img, (int(img.shape[1] * scale / 100), int(img.shape[0] * scale / 100)),
-    #                      interpolation=cv2.INTER_AREA)
-    # cv2.imwrite(temp_path + r'\rawNTSA.png', resized)
-
-    # ------ ILLUSTRATION
-    fr.__write_img__(morph_img, f'int_{low_lim}', img_folder=__ill_folder__, write=__illustration__, c=cnt,
-                     cc='blue', ct=50)
-    # ------ ILLUSTRATION
 
     return cnt, morph_kernel, low_lim, it_thresh
 
@@ -247,11 +213,9 @@ def extendSquareRowY(ext_box_coords, field_space, box_params, dupes=6):
 # ::::: PROCESS : EXTENDING SQUARES IN X
 def extendSquare(box, md_scalar):
 
-    # define NTSA dimensions
-    mean_scale = np.mean(md_scalar)  # find mean scale from x and y scalebar
-    NTSA_len = 20 * 10e-3 * mean_scale
-    field_len = 2.1 * 10e-3 * mean_scale
-    field_sep = .4* 10e-3 * mean_scale
+    # define NTSA dimensions (scale bar is in pixel/µm)
+    NTSA_len = 20e3 * md_scalar
+    field_sep = .4e3 * md_scalar  # this comes from (NTSA - 8 * Field) / 7
 
     row_box, box_prm = extendSquareX(box, field_sep, dupes=7)
 
