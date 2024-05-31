@@ -7,9 +7,7 @@ import mask_analysis as ma
 import time
 
 # THIS SCRIPT MUST BE RUN FROM THE .BAT FILE TO WORK
-time_stamp = time.localtime()
-print()
-print(f'{time.strftime("%H:%M", time_stamp)} - Input path to folder with .vsi files (the script will find all files in the given folder)')
+ma.__time_print__('Input path to folder with .vsi files (the script will find all files in the given folder)')
 data_path = str(input('Enter Directory: '))  # get data folder path
 if data_path[-1] == '\\':  # remove end \ if present
     data_path = data_path[:-1]
@@ -31,14 +29,12 @@ out_path = '\\'.join(listed_path)
 data_files = [i for i in os.listdir(data_path) if i.split('.')[-1] == 'vsi']
 data_folders = [i.replace('.vsi', '') for i in data_files]
 force_pro = []  # set empty force processing list for later use
-ana_method = 0  # set initial analysis method to standard LFSR
+ana_method = 0  # set initial analysis method to feature recognition
 
 # progress check the script
 # check out path validity (if no such file, progress must be zero)
 if not os.path.exists(out_path):
-    time_stamp = time.localtime()
-    print()
-    print(f'{time.strftime("%H:%M", time_stamp)} - CREATING OUTPUT DIRECTORY')
+    ma.__time_print__('CREATING OUTPUT DIRECTORY')
     print(f'---| {out_path}')
     os.makedirs(out_path)
 
@@ -47,24 +43,19 @@ for i in data_folders:
     vsi_dir = data_path + r'\_' + i + '_'
     for j in images:
         if not os.path.isfile(vsi_dir + j):
-            time_stamp = time.localtime()
-            print()
-            print(f'{time.strftime("%H:%M", time_stamp)} - Data files are missing. Running microscoper script to '
-                  f'generate missing files.')
+            ma.__time_print__('Data files are missing. Running microscoper script to generate missing files.')
             p = subprocess.Popen(rf'microscoper -f . -k {i}', cwd=data_path)
             p.wait()
             break
 
 # perform preprocessing of images
 angle_max_fields, fixed_best_angle = False, False
-out_dirs = ma.preProcessImgs(data_folders, data_path, out_path, images, force_pro, ana_method, angle_max_fields,
+out_dirs, _sb = ma.preProcessImgs(data_folders, data_path, out_path, images, force_pro, ana_method, angle_max_fields,
                                      fixed_best_angle)
 
 redo_check = True
 while redo_check:
-    time_stamp = time.localtime()
-    print()
-    print(f'{time.strftime("%H:%M", time_stamp)} - Image pre-processing is done. If re-processing of any images is '
+    ma.__time_print__('Image pre-processing is done. If re-processing of any images is '
           f'desired, enter the file numbers below separated by a ",", type in a range from one image to another '
           f'separated by a "-", or press ENTER to continue.')
     for id, e in enumerate(data_folders):
@@ -84,9 +75,7 @@ while redo_check:
                 redo_list.append(int(i))
         force_pro = [e for i, e in enumerate(data_folders) if i in redo_list]
 
-        time_stamp = time.localtime()
-        print()
-        print(f'{time.strftime("%H:%M", time_stamp)} - Which method of recognition should be employed?')
+        ma.__time_print__('Which method of recognition should be employed?')
         print('[0]: Large Feature Set Recognition')
         print(' >>>   [0.1]: Specify Max Fields for Angle Determination')
         if len(redo_list) == 1:
@@ -99,23 +88,21 @@ while redo_check:
         ana_method = str(input('Enter Number: '))
 
         if ana_method == '0.1':
-            print()
-            print(f'{time.strftime("%H:%M", time_stamp)} - Specify the maximum number of fields the MOFM script should '
+            ma.__time_print__('Specify the maximum number of fields the MOFM script should '
                   f'use to find the angular offset. The default is 6. Note that going higher will inevitably cause the '
                   f'found fields to be of worse quality, but quantity may prevail here.')
             angle_max_fields = int(input('Enter Max Field Number: ')) - 1
         if ana_method == '0.2':
-            print()
-            print(f'{time.strftime("%H:%M", time_stamp)} - Enter the angle offset in degrees. It is currently only '
+            ma.__time_print__('Enter the angle offset in degrees. It is currently only '
                   f'possible to enter a single angle, so it is advised to only use this for a single image at a time.')
             fixed_best_angle = np.deg2rad(float(input('Enter Angle Offset: ')))
         if ana_method == '0.3':
             angle_max_fields = 0
 
         # perform preprocessing of images
-        out_dirs = ma.preProcessImgs(data_folders, data_path, out_path, images, force_pro, ana_method, angle_max_fields,
-                                     fixed_best_angle)
+        out_dirs, _sb = ma.preProcessImgs(data_folders, data_path, out_path, images, force_pro, ana_method,
+                                          angle_max_fields, fixed_best_angle)
 
 # perform processing of cut images
-ma.processImgs(data_folders, out_dirs, out_path)
-print('Image processing is done. This window can be closed now.')
+ma.processImgs(data_folders, out_dirs, out_path, _sb)
+ma.__time_print__('Image processing is done. This window can be closed now.')
