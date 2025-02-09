@@ -1,0 +1,76 @@
+{
+    "PreprocessingOptions": {
+        "AppLabelMaskChannel": "The mask channel, is the image color channel for which the mask can be identified. When selecting the input folder, the script will look through the available channels and update the selection menu accordingly.",
+        "AppLabelSampleType": "The sample type determines how the script will handle preprocessing of the image. Fields are individual units on the image, that should be analyzed separate from each other for comparison."
+    },
+    "MultiFieldPreprocessingOptionsContainer": {
+        "AppLabelRotate": "The Rotate setting orients the input image counterclockwise either 90, 180, or 270 degrees. Using 'Auto' requires setting up an orientation reference for the selected image mask.",
+        "AppLabelImageMask": "Specify the field mask to be utilized for the input data.",
+        "AppLabelAlign": "Set the angular offset in degrees to the horizontal plane for the field mask. If the field is left blank, this will be automatically determined.",
+        "AppLabelMinFields": "During masking, the script will cycle through intensity thresholds to find the mask fields. The number of Fields set the minimum number of fields the script needs to find per iteration to save the current threshold to use for further masking .",
+        "AppLabelMaskingMethod": "Influences the way the mask finding is conducted. If 'Calculate' the script will use exclusively computed field positions and dimensions (this is often more accurate). If 'Hybrid' the script replace computed fields with the best-fitting unique fields that were found during masking.",
+        "AppLabelMaskShift": "Feature is not implemented yet.",
+        "AppSubtitleImageSettings": "Set the image settings for the selected input data. Disabled rows will be skipped during preprocessing. These can always be preprocessed at a later time. For each setting; control-clicking a field following change of the setting will change all such settings to that value."
+    },
+    "SingleFieldPreprocessingOptionsContainer": {
+        "AppLabelAlign": "Set the angular offset in degrees to the horizontal plane for the field mask. If the field is left blank, this will be automatically determined.",
+        "AppLabelMaskingMethod": "To find the field mask, the script will cycle through intensity thresholds. If 'Average' the field will be the average of the found fields. If 'Best' the field will be the best dimensional fit from the found fields. If prefixed with 'Fixed' only the alignment angle and field position will be used. Field dimensions will be fixed to the selected mask.",
+        "AppSubtitleImageSettings": "Set the image settings for the selected input data. Disabled rows will be skipped during preprocessing. These can always be preprocessed at a later time. For each setting; control-clicking a field following change of the setting will change all such settings to that value."
+    },
+    "MultiFieldMaskCreator": {
+        "TextButtonImportMask": "This lets you import a mask that is either a tab-delimited .txt file or an excel file.",
+        "TextButtonOpenMask": "This lets you open an existing mask to edit it or simply append it to the current sample type.",
+        "AppLabelSpacingDeviation": "By default the script assumes that there are just as many spacings as there are fields in a given row or a column. A negative integer will subtract from the expected about of spacings, whereas a positive integer will add."
+    },
+    "PresentationMaskCreator": {
+        "subtitlePresentationMask": "Here you can construct a mask that should be used for plotting. The data analysis will be made according to the initial mask, and for the data presentation the labels will be exchanged for those provided in the mask below. By default, the original mask for the sample is always loaded in when launching the setup. Control-clicking on any field will disable it, and it will not be shown in the final plots and figures.",
+        "AppCheckbuttonUseTex": "Enabling this will set the matplotlib parameter 'text.usetex' to True. To learn more about what is possible with TeX in matplotlib see 'Rendering math equations using TeX' in the matplotlib documentation. Note that use of this functionality requires a preinstalled TeX distribution on your system.",
+        "AppCheckbuttonTexMath": "In effect, enabling this setting will put '$' symbols around the expressions for all entries, which will make them appear as text in a TeX math field in the matplotlib figure.",
+        "AppCheckbuttonRawString": "This will convert all entries to raw strings before being read by matplotlib."
+    },
+    "FieldSortingCreator": {
+        "LabelDelimiter": "Here you can set which characters each field code should be split by. By default, every non-whitespace character you type here, will be treated individually, as a splitting character. E.g. 'k,3 4' will split all field codes at 'k', ',', '3', and '4'. If the multiple characters separator is set to ',', then all codes will be split at 'k' and '34'. If respect white space is also enabled, then the splitting would be 'k' and '3 4'.",
+        "AppCheckbuttonUseRegex": "This will change the interpretation of the delimiters entry. "
+    },
+    "OrientationReferenceCreator": {
+        "AppLabelSampleName": "Select the sample you want to use as a reference for the sample orientation setup. Once a file has been selected, the program will generate required files if they do not exist."
+    },
+    "ProcessingOptions": {
+        "AppLabelEdgeExclusionDistance": "Exclude cells which center lies outside the border of a field that is a certain distance smaller in each direction than the real field. Thus, removes cells within a certain distance of each field edge.",
+        "AppLabelCellType": "The cell type has specific dimension parameters defined. Setting the proper cell type, will help the script identify the cells rather than either identifying false positives or skipping over real cells.",
+        "AppLabelCellChannel": "The image color channel for which the cell nuclei can be identified. This will update automatically with the mask channel option from the preprocessing options, once channel data becomes available to the program.",
+        "AppLabelCountingMethod": "Method to use for identifying the cells on each field. 'CCA' uses connected component analysis on a dynamically thresholded image. Works well in most cases. 'Black-Out' performs threshold iterations and blacks out found cells on the way to prevent double identification in smaller slices of each field. At the end of operation slices are merged and duplicates are removed. Works for both large and small fields, but requires really good input data. 'Classic' performs threshold iteration and selects the threshold with the maximum cell count as the cell count. Performs poorly for large fields. 'Hough' uses Canny edge detection along with complex thresholding to identify a threshold with the maximum amount of cells as the real cell count. Not recommended for larger fields. Read more about the methods in the documentation.",
+        "AppLabelSliceSize": "Sets the edge length of the slice square in pixels. If using 'CCA' it is usually not necessary to set a slice size. Note, however, too small slices can cause excessive amounts of false positives. Start with slices around half the image length. If 'Black-Out' it is recommended to start with a slice size of 400.",
+        "AppLabelFilter": "Before running cell identification, an aggressive background removal is performed. The background is determined as the product between the Filter scalar and the average pixel intensity for the slice.",
+        "AppLabelCycles": "After each set of threshold iterations, the thresholding can be run in additional cycles with increasing filter aggression. The filter increase per cycle is determined by the step size.",
+        "AppLabelStep": "Determines the flat increase the filter aggression should acquire for each cycle.",
+        "AppSubtitleCellCounting": "Set the cell counting settings for the selected preprocessed images. Disabled rows will be skipped during processing. These can always be processed at a later time. For each setting; control-clicking a field following change of the setting will change all such settings to that value."
+    },
+    "AnalysisOptions": {
+        "AppLabelFieldSorting": "Add a specific sorting of the fields for the generated plots.",
+        "AppLabelExternalReferenceGroup": "If selected, all fields will be normalized to the cell count of the selected reference group.",
+        "AppCheckbuttonNucleiAnalysis": "Normalize the cell count data if control fields or external control have been selected, and plot the cell counts per field. Read more about the analysis in the documentation.",
+        "AppSubtitleControlFields": "Set where the control fields are on the mask you are using. If you are using a pre-defined mask, these will be preset. Otherwise you will need to identify which areas on your mask are your control fields, and set them here by clicking on the fields that are controls. Clicking on a marked field will un-mark it.",
+        "AppLabelSelectedFields": "Once fields are selected in the control fields grid, their ids or names will start to appear here. Note that if you have selected a mask first, the selected fields will correspond to the mask names.",
+        "AppLabelPresentationMask": "The presentation mask will be used when creating data figures. This specifically affects the appearance of indexing on the constructed figures. If \\'Native\\' the program uses the mask defined in the mask creator.",
+        "AppLabelMaxNND": "Set the probability cut-off for the nearest neighbour distribution figure. This exclusively affects the visual data representation, the data is still fully analyzed. This can be used to create more focus on the 'interesting' part of the distribution function, if say the data set is very heavy-tailed. Leaving this setting blank disables it.",
+        "AppCheckbuttonZeroLock": "Determine whether the log normal distribution should be restricted to a lower boundary of 0. For many-cell fields the boundary is usually > 0. However, for few-cell samples, the distribution tends to fit a function with negative values. Activating zero lock will prevent negative values in the distribution function, but will often give a worse fit to the real data.",
+        "AppLabelFigureFont": "Set the font type used to write on figures created from the data analysis scripts. Make sure that you have the set font on your operating system and that you have updated your matplotlib font library to include it as well if it is not a standard font.",
+        "AppLabelFigureScalar": "Scales the figure size through the \\'figsize\\' argument in matplotlib. This primarily affects label sizes.",
+        "AppCheckbuttonExcelExport": "This will generate an Excel file with all processed data results. Usually, the amount of data generated in the processing is quite vast. Thus, generating a compiled Excel file may take multiple minutes."
+    },
+    "DataGroupEditor": {
+        "AppSubtitleGroupData": "Group the data based on sets of technical replicates. For the data analysis the mean cell count for each field will be found for each group and used as the \\'true\\' cell count for that sample set. These group names will also be used as labels for the generated plots. Clicking on any displayed file will toggle it. The data groups only affects methods of analysis accounting for technical replicates, unless specified otherwise.",
+        "AppLabelColorPreset": "The color preset will determine the colors of each grouped data set in the generated figures.",
+        "AppLabelEditGroups": "Edit the group names by editing the labels to the right. Control-clicking on a group label will disable all data entries related to that group. These can always be re-enabled by toggling each row.",
+        "TextButtonAutoGroup": "Auto-group can group the input data if it is of shape X_n. Meaning that if some files have a common name X and are each a technical replicate of number n, then they can be grouped into their common name. E.g. for data named 2h_1, 2h_2, 2h_3, 4d_1, 4d_2, 4d_3, two groups called 2h and 4d will be created. Note that all underscores are replaced with spaces."
+    },
+    "ApplicationSettings": {
+        "AppLabelMaxRelativeCPU": "Determines the amount of processing units the concurrent.futures Pool functions can use relative to the total amount of available units. Note that although the system has enough CPU power to increase computational power, if large image files are used, the system RAM will quickly become occupied, which will raise a memory error. It is recommended to set the CPU count conservatively.",
+        "AppLabelMaxAbsoluteCPU": "Determines the specific amount of processing units the concurrent.futures Pool functions can use.",
+        "AppLabelAuditImageResolution": "When the script generates 'control' images, this is the maximum image size the script will save as. If this is larger than the original image dimensions, the original dimensions will be used instead.",
+        "AppLabelTooltipTimer": "Specify for how long the cursor should hover over a tooltip-bound label, before the tooltip displays. Requires program restart to take effect.",
+        "AppSubtitleMaskDeletion": "Delete either a field mask or a presentation mask. As presentation masks are tied to the field mask, deleting a field mask will cause removal of all associated presentation masks. Mask deletion cannot be undone once performed, and will remove all associated data entries and files for the selected mask.",
+        "AppCheckbuttonDebugger": "Enabling debugging will stop concurrent.futures Pools if they cast an error and yield the full error log from that process. By default, this is off, and if a pooled process failed, a file-failed print will be executed, and the other processes in the pool will be executed."
+    }
+}

@@ -1,0 +1,19 @@
+{
+    "MultiFieldPreprocessingOptionsContainer": {
+        "TextButtonResetImageSettingsTable": "This will reset all image settings to default values.",
+        "TextButtonLoadPreviousSettings": "This will overwrite all image settings where values from a previous preprocessing exists."
+    },
+    "SingleFieldPreprocessingOptionsContainer": {
+        "TextButtonResetImageSettingsTable": "This will reset all image settings to default values.",
+        "TextButtonLoadPreviousSettings": "This will overwrite all image settings where values from a previous preprocessing exists."
+    },
+    "ProcessingOptions": {
+        "TextButtonResetCellCountingTable": "This will reset all cell counting settings to default values.",
+        "TextButtonLoadPreviousSettings": "This will overwrite all cell counting settings where values from a previous cell counting exists."
+    },
+    "ApplicationSettings": {
+        "TextButtonDeleteFieldMask": "This will remove all traces of the selected mask from the program along with all associated presentation masks. This action cannot be undone.",
+        "TextButtonDeletePresentationMask": "This will remove all traces of the selected presentation mask from the program. This action cannot be undone.",
+        "TextButtonRestoreDefaults": "This will change all settings to the default values."
+    }
+}
