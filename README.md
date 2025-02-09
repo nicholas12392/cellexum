@@ -1,118 +1,40 @@
 # Cellexum
-**Cell**a **ex**plicatio amminicul**um** or cell analysis tool, is a specialized low-level program made to analyze cell counts along with some supporting information on fluorescence images of Nanotopography Screening Array (NTSA) interfaces, which is a set of different surface topographies on a single sample developed by M. Foss et al. (personal communication, 2023).
-The program is made to analyze images directly taken from an Olympus optical microscope with cellSens (i.e. in .vsi file format).
-
-The detailed mechanics of the script can be found in [Technical Details](https://github.com/nicholas12392/cellexum#technical-details).
+**Cell**a **ex**plicatio amminicul**um** or cell analysis tool, is a program for analyzing cells on fluorescence images taken on e.g. Olympus microscopes.
 
 If you have multiple python installations on your machine, you will have to edit the `python.exe` in the `RUN.bat` file to the path of your target python installation.
 
-## Operating the Program
-The script consists of six different files that each have a specific function.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/ea9a9e43-553a-4dd1-95f2-c831db4bd699"><br>
-  Figure 1: <b>Program file overview.</b> All files will be explained later in more detail.
-</p>
+## Quick Start Guide
+### Loading in image files
+When the program has been loaded through the bat file it will automatically start in the 'File Selection' menu.
+The program takes an entire folder with .vsi images. Click on the directory entry to select a local folder. The 'SELECT ALL' and 'DESELECT ALL' buttons allow quick toggling of all files. This selection menu acts to reduce clutter for later stages of the program. At any time can a deselected file be reselected and processed. 
 
-### Initializing Program
-Once fluorescence images have been obtained and it is time to process them and get cell counts, simply launch the script by double-clicking the RUN.bat file. Once the script is running, it will start by adding the current path to PATH, whereafter it prompts for the location of the fluorescence images.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/bdc7ae82-3f90-4668-9537-dd02dec592d8"><br>
-  Figure 2: <b>Initializing script with target path.</b>
-</p>
+### Before looking for cells (Preprocessing)
+The program features methods for identifying specific rectangular fields that are important on the surface that has been imaged. For example, an imaged surface that contains unique fields that are of interest can be masked for those fields before counting the cells. This way, it is possible to get unique data analysis for each field for elaborate data analysis. 
+The program will automatically set an output folder, once the input folder has been set. The output folder can be changed at any time, but analysis progress made in one output folder will not be transferred automatically to the new output folder.
+It is possible to change all file settings related to a specific setting by changing the specific setting, and then control-clicking on the changed field. 
 
-### Optimal Preprocessing
-When the image path is given, press enter. If there is currently no output directory, the script will create one.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/306cbb7d-237a-481d-81d7-fb42bdb6a320"><br>
-  Figure 3: <b>Creating missing output path.</b>
-</p>
-Secondly, if the microscoper script has already been run, and the necessary files have been generated, the program will start preprocessing the images by rotating, masking, and slicing. Each major step in this process is marked along with some smaller steps, so that it is clear what the script does and when.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/01e21fc3-8459-4cd4-abc4-3740ead5e54f"><br>
-  Figure 4: <b>Preprocessing image data.</b> Note that in newer versions sligtly more information shown than what is in the image, yet these are the major steps.
-</p>
-Note that this is simply a single bar being continuously updated in the program. Here each update is imaged to better illustrate what is going on. Furthermore, by default, the script will first attempt to employ LFSR with MOFM, and if that fails it moves to BSR with MOFM. In newer versions an additional bar marking smaller steps will sometimes be visible below the primary bar.
+#### Sample types
+This option is set depending on whether the image contains a surface that has more than one field or just a single field. Depending on the choice, the rest of the preprocessing settings will change.
+The important change between the two options is that for multi-field surfaces, it is possible to create orientation configurations, along with custom masks that will be used for data presentation. This way, it is not necessary to rotate all images prior to analysis or exporting all the data generated through the program to do plotting afterward. 
+If there exists no image mask, add a mask by pressing on the image mask selection menu and press 'Add ...'. This will open a mask creator window where the parameters for the field mask can be configured. After saving the mask, it will automatically be selected in the main frame. If the mask channel has also been set, it will now be possible to create an orientation reference. 
 
-### Missing Files Generation (microscoper)
-If on the other hand, files are missing, the microscoper script by pskeshu will be run, and the missing files will be generated.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/983698d3-0dd3-4d89-abf3-c323716c2828"><br>
-  Figure 5: <b><a href="https://github.com/pskeshu/microscoper">microscoper</a> script creating missing files.</b>
-</p>
-Once the microscoper script has finished, the program will continue as expected.
+#### Mask channel
+Here the color channel of the image for which the fields to be masked are visible is chosen. 
 
-### Select Images for Reprocessing or Continue
-For each fluorescence image in the folder, the preprocessing will be done in the sequence from before. Once all images have 
-been through, the script will note that it is done and it is then possible to redo preprocessing for specific images if they are not 
-to a satisfactory quality.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/b1e10bda-2ab0-4b32-9ec1-1573c9b766ad"><br>
-  Figure 6: <b>First manual control stop.</b>. At this point, check that all the masks are of sufficient quality.
-</p>
-In the example above, once you press enter, the images ‘0’, ‘3’, and ‘7’ will be redone.
+#### Orientation reference
+The orientation reference holds information about how the image 'type' looks when it is rotated correctly. To use this feature, select a reference file and wait for the necessary elements to be generated. The window will automatically update once resources are ready. Click on the loaded image to zoom to native resolution, and use the +90 and -90 buttons to rotate the preview image. Once the image has the correct orientation, press on create mask, and wait for the program to map out the mask on the reference image. Once resources are ready, the masked image will be displayed. Check whether the mask has been applied correctly, and close the mask creator if so; otherwise, try altering the parameters or selecting a different file. 
+Note that it is required to set up an orientation reference if the automatic rotation determination is to be used.
 
-Following, you will have to choose which method of preprocessing you wish to attempt. If you select only one image, you can 
-specifically set the angular compensation with the LFSR method.
-<p align="center">
-  <img width="400vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/8c07c27d-b0dd-4e38-b2e4-36c695e29be8"><br>
-  Figure 7: <b>List of analysis methods to choose from</b> if only a single image was selected.
-</p>
-Both options ‘0’ and ‘1’ will use MOFM for masking, whereas the last option will use the forced square method as emphasized. 
-When this is done, the preprocessing will begin, and when done, the script will prompt again with the option to redo. If all 
-mappings are good, simply press enter to continue.
+### Quality control (Mask Gallery)
+After the field masks are created, they will start popping up in the mask gallery. Here it is possible to see different fit parameters for the mask and a low-res and hi-res version of the mask can be opened directly from the GUI (Windows only). If some of the masks are wrong, go back to the preprocessing menu, change some parameters, and retry the masking. 
 
-If you select more than one image, you will only have the following options and the specific option will be applied to all images 
-selected for reprocessing.
-<p align="center">
-  <img width="400vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/536cdcbe-8eee-4433-90e7-0c610da88a23"><br>
-  Figure 8: <b>List of analysis methods to choose from</b> if multiple images were selected.
-</p>
-Note that both options ‘0’ and ‘1’ will use MOFM for masking, whereas the last option will use the forced square method as 
-emphasized. When this is done, the preprocessing will begin, and when done, the script will prompt again with the option to 
-redo. If all mappings are good, simply press enter to continue.
+### Identifying the cells (Processing)
+Once the field masks have been properly configured, the images can be processed for identifying cells. The cell type is not too important and only acts as an upper bound for nuclei size. Currently, there are not many options, so simply leave it at fibroblast, regardless of the cell type on the image. The channel is the image color channel for which the cell nuclei are visible.
+There are different counting methods, but usually, the CCA (connected component analysis) will be the most optimal. 
 
-### Manual Mask Control
-Note that a new directory will have been created in the parent directory named ‘_masks for manual control’, wherein there are
-downscaled contrast-enhanced masks, which can be swiftly checked. If there is any doubt a high-resolution copy of the mask 
-without enhancements is always saved in the child directory for the current image.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/06394c0b-d7a6-4db7-ba8a-7c6eb431c4b0"><br>
-  Figure 9: <b>Created path and manual control file.</b>. Start by checking the overview mask, and if there is any doubt check the full resolution mask.
-</p>
-The meaning of T# is the measure of how strictly it was possible to fit the mask. This is measured in tolerance levels. The best tolerance is T0, which is the initial fit condition of an allowed error on the area of +/-3% and the height/width ratio of +/-0.001. Only contours that have more than 10% infill are saved. The T0 data will always be used to determine the angular correction of the masked arrays since the angular offset is most accurate the more precise the mask fits the arrays. If the T0 dataset contains less than 7 arrays, the script will up the tolerance with +/-0.5% area and +/-0.001 ratio and fit again. This will continue until the criteria is passed. The tolerance just above (or at) the criteria level, is then used to determine the average distance between arrays in the mask, to get the most accurate positional representation. Thus, in the control image, the green (left) tolerance is the best tolerance for which arrays could be fitted, which has been used to determine the angular offset, and the red (right) tolerance is the worst tolerance (or the criterium) tolerance used to fit the array positions.
-The determined field parameters signify the average pixel height and width of each array and 'A', the horizontal angular offset.
+### Analysis
+After processing, the images can be analyzed. The analysis menu features an auto-grouping function, which can automatically group the input data. Currently, the only two analysis options implemented are nuclei analysis and nearest neighbor evaluation. The nuclei analysis will use raw cell counts along with a presentation mask and sorting of the fields (Multi-Field only) to generate cell count plots. The nearest neighbor evaluation allows for a thorough analysis of the nearest neighbor distances on the images. 
+If the sample type is Multi-Field, it is also possible to set up control fields for the particular field mask. Specifically, these fields will be used as internal controls. They will first have their cell counts averaged (if there are multiple control fields), whereafter cell counts for all fields will be divided with that average. 
 
-### LFSR Failure
-There are a few reasons for which LFSR might fail. If this occurs, the program will attempt to go through masking with BSR.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/8375986a-acab-4a64-bb5c-1be7eebc10e6"><br>
-  Figure 10: <b>LFSR failure example.</b>
-</p>
-This will then be done in the sequence mentioned earlier. Note that if this occurs, it is very important to check that the rotation 
-did indeed occur correctly since this method is less robust than the LFSR method. If the orientation has indeed failed, it is
-advised to use enhanced BSR.
-
-Currently, the options from the failed LFSR attempt are not inherited.
-
-### Cell Counting
-Once the mask has been done, when continuing the script will start counting the cells from all the cut UV images.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/f37de0ea-0b55-4061-9b4d-baa95a8a4faf"><br>
-  Figure 11: <b>Cell count determination step.</b>
-</p>
-For each count, an additional UV image is saved so that if desired it is possible to check the cell count manually against the 
-determined count. Note that if CTC is used the counts are red and if HCC they are green.
-<p align="center">
-  <img width="700vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/4110062a-a320-4ae5-b9ae-1456dbbfc99d"><br>
-  Figure 12: <b>Cell count checking.</b>
-</p>
-At last, when all cells have been counted, an Excel file containing all the counts mapped to the field type is saved for further
-processing. Additionally, an extra file is created. This file contains the cell count from area counting, which is the total cell area 
-for a field, divided by the estimated size of a cell nucleus. The area count is usually unreliable, but can in very specific cases be 
-the best option. The two counts may, however, in many cases be the same.
-<p align="center">
-  <img width="550vw" src="https://github.com/nicholas12392/cellexum/assets/87773847/81cc42a3-691f-4d95-8867-0601f6957356"><br>
-  Figure 13: <b>Output cell count files</b>
-</p>
-
-## Technical Details 
+### Application Settings
+Clicking on the settings wheel in the bottom left corner will bring up the application settings menu. Here it is possible to set different parameters for the program along with deleting created masks. The important settings to note are the maximum CPU settings. This relates to the max_workers in concurrent.futures.ProcessPoolExecutor. Although your local system may have enough CPU power, depending on the size of the opened image RAM may become an issue. If memory errors occur, lower the maximum CPU.
