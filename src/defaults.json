@@ -1,0 +1,9 @@
+{
+    "ApplicationSettings": {
+        "MaxRelativeCPU": 0.5,
+        "MaxAbsoluteCPU": "",
+        "AuditImageResolution": 1150,
+        "TooltipTimer": 700,
+        "Debugger": false
+    }
+}
