@@ -14,6 +14,8 @@
     "ApplicationSettings": {
         "TextButtonDeleteFieldMask": "This will remove all traces of the selected mask from the program along with all associated presentation masks. This action cannot be undone.",
         "TextButtonDeletePresentationMask": "This will remove all traces of the selected presentation mask from the program. This action cannot be undone.",
-        "TextButtonRestoreDefaults": "This will change all settings to the default values."
+        "TextButtonDeleteFieldSorting": "This will remove all traces of the selected field sorting from the program. This action cannot be undone.",
+        "TextButtonRestoreDefaults": "This will change all settings to the default values.",
+        "TextButtonResetCache": "This will delete all files in the cache folder, effectively resetting the application state to a fresh install. Note that while mask files and mask set-ups are preserved, associated control fields with Multi-Field masks will be reset."
     }
 }
