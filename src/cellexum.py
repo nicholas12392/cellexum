@@ -12,8 +12,11 @@ import os
 import threading
 import multiprocessing
 import numpy as np
+from fontTools.ttLib.tables.S_V_G_ import doc_index_entry_format_0
 from matplotlib.style.core import available
 
+import base
+from base import directory_checker
 from skeletons import *
 import analysis
 import cv2
@@ -87,7 +90,7 @@ class FileSelection(WindowFrame):
             self.container_drop('AppFrameFileSelectionContainer')  # remove existing files in the container
             file_folders = [i.removesuffix('.vsi') for i in os.listdir(selected_directory) if i.endswith('.vsi')]
 
-            for folder in file_folders:
+            for folder in supports.sort(file_folders):
                 elem = self.add(AppCheckbutton, text=folder, container='AppFrameFileSelectionContainer')
                 elem.trace_add('write', self.__update_selection)
 
@@ -101,13 +104,15 @@ class FileSelection(WindowFrame):
 
     def __update_selection(self, *_):
         """Internal method that updates the selected files dependent variable."""
-        _ = {}
-        for elem in self.containers['AppFrameFileSelectionContainer']:
-            _[self[elem].text] = self[elem].get()
-        self.dv_set('SelectedFiles', _)
+        try:
+            _ = {}
+            for elem in self.containers['AppFrameFileSelectionContainer']:
+                _[self[elem].text] = self[elem].get()
+            self.dv_set('SelectedFiles', _)
+        except KeyError:
+            supports.tprint('There exists no .vsi files at %s' % self.dv_get('InputFolder'))
 
     @supports.thread_daemon
-    @supports.timer
     def __post_available_channels(self, *_):
         """Internal method that posts the available color channels as a global variable."""
 
@@ -117,6 +122,7 @@ class FileSelection(WindowFrame):
             if not available_channels:
                 raise KeyError
         except KeyError:
+            self.dv_set('AvailableChannels', [])  # ensure that channels are blocked, until new are found
             _in, _out = multiprocessing.Pipe(duplex=False)  # open pipe
             process = multiprocessing.Process(target=self.channel_search, args=(self.dv_get('InputFolder'), _out),
                                               daemon=True)
@@ -183,9 +189,11 @@ class MultiFieldPreprocessingOptions(FieldProcessingFrame):
         elem.trace_add('write', self.__update_image_mask_cache)
 
         self.add(AppSubtitle, text='Image Settings', tooltip=True)
+        self.add(TextButton, sid='ResetImageSettingsTable', text='Reset', command=self.restore_default, warning=True,
+                 prow=True, padx=(170, 0), pady=(42, 5))
         self.add(AppFrame, sid='ImageSettingsTable')  # table container
-        self.add(TextButton, sid='ResetImageSettingsTable', text='Reset', command=self.restore_default,
-                     container='AppFrameImageSettingsTable', warning=True)
+        self.add(TextButton, sid='LoadUnPreprocessed', text='Select Unpreprocessed', command=self.select_missing,
+                 container='AppFrameImageSettingsTable')
         self.add(AppLabel, text='Rotate', sid='Rotate', prow=True, column=1, padx=5,
                  container='AppFrameImageSettingsTable', tooltip=True)
         self.add(AppLabel, text='Align', sid='Align', prow=True, column=2, container='AppFrameImageSettingsTable',
@@ -195,6 +203,10 @@ class MultiFieldPreprocessingOptions(FieldProcessingFrame):
         self.add(AppLabel, text='Masking Method', sid='MaskingMethod', prow=True, column=4,
                    container='AppFrameImageSettingsTable', padx=5, tooltip=True)
         self.add(AppLabel, text='Mask Shift', sid='MaskShift', prow=True, column=5,
+                 container='AppFrameImageSettingsTable', padx=5, tooltip=True)
+        self.add(AppLabel, text='Fidelity', sid='IterativeFidelity', prow=True, column=6,
+                 container='AppFrameImageSettingsTable', padx=5, tooltip=True)
+        self.add(AppLabel, text='Span', sid='OnsetIntensitySpan', prow=True, column=7,
                  container='AppFrameImageSettingsTable', padx=5, tooltip=True)
         self.update_image_settings()
         self.add(TextButton, sid='LoadPreviousSettings', text='Load Previous Preprocessing', warning=True,
@@ -207,16 +219,28 @@ class MultiFieldPreprocessingOptions(FieldProcessingFrame):
         self.__show_orc_button()
 
     def __load_orientation_reference_creator(self):
-        level = TopLevelWidget(self); level.geometry('800x740'); level.title('Orientation Reference Creator')
-        _main = OrientationReferenceCreator(level, name='OrientationReferenceCreator', tie=self)
-        _main.pack(fill='both', expand=True)
+        # prior to opening the OrientationReferenceCreator the MaskChannel must be saved to the Settings.json
+        _ = {'CollectionPreprocessSettings': {
+            'MaskChannel': self.parent['SelectionMenuMaskChannel'].get(),
+            'SampleType': self.parent['SelectionMenuSampleType'].get(),
+            'MaskSelection': self['SelectionMenuImageMask'].get()
+        }}
+
+        base.directory_checker(self.dv_get('OutputFolder'), clean=False)
+        supports.json_dict_push(r'{}\Settings.json'.format(self.dv_get('OutputFolder')), params=_, behavior='update')
+
+        level = TopLevelWidget(self); level.title('Orientation Reference Creator')
+        level.geometry(f'{int(self.winfo_screenwidth() * .5)}x{int(self.winfo_screenheight() * .5)}')
+
+        content = OrientationReferenceCreator(level.main.interior, name='OrientationReferenceCreator', tie=self)
+        content.grid()
 
     def add_table_entry(self, file):
         _ = self.add(TextCheckbutton, text=file, sid=f':{file}', fg=supports.__cp__['fg'], font='Arial 12',
                      container='AppFrameImageSettingsTable', padx=(0, 15), tag='ImageSelection')
         _.bind('<Control-1>', self.update_all)
 
-        _ = self.add(SelectionMenu, sid=rf'Rotate:{file}', prow=True, column=1, width=7,
+        _ = self.add(SelectionMenu, sid=rf'Rotate:{file}', prow=True, column=1, width=6,
                      font='Arial 12', bg=supports.__cp__['dark_bg'], container='AppFrameImageSettingsTable',
                      default=0, options=('Auto', '0', '90', '180', '270'), padx=5, group='ImageSettingsTable')
         _.tether(self[f'TextCheckbutton:{file}'], False, action=_.tether_action)
@@ -232,29 +256,41 @@ class MultiFieldPreprocessingOptions(FieldProcessingFrame):
         _.tether(self[f'TextCheckbutton:{file}'], False, action=_.tether_action)
         _.bind('<Control-1>', self.update_all)
 
-        _ = self.add(SelectionMenu, sid=rf'MaskingMethod:{file}', prow=True, column=4, width=14, padx=5,
+        _ = self.add(SelectionMenu, sid=rf'MaskingMethod:{file}', prow=True, column=4, width=13, padx=5,
                      container='AppFrameImageSettingsTable', default=0, options=('Calculate', 'Hybrid'),
                      group='ImageSettingsTable')
         _.tether(self[f'TextCheckbutton:{file}'], False, action=_.tether_action)
         _.label_bind('<Control-1>', self.update_all)
 
         _ = self.add(SelectionMenu, sid=rf'MaskShift:{file}', prow=True, column=5, width=8, padx=5,
-                     container='AppFrameImageSettingsTable', default=0, options=('None', 'Auto'),
+                     container='AppFrameImageSettingsTable', default=0, options=('Auto', 'None'),
                      group='ImageSettingsTable')
         _.tether(self[f'TextCheckbutton:{file}'], False, action=_.tether_action)
         _.label_bind('<Control-1>', self.update_all)
+        
+        _ = self.add(SettingEntry, sid=f'IterativeFidelity:{file}', prow=True, column=6, width=6, padx=5,
+                     container='AppFrameImageSettingsTable', default=3, group='ImageSettingsTable', vartype=int)
+        _.tether(self[f'TextCheckbutton:{file}'], False, action=_.tether_action)
+        _.bind('<Control-1>', self.update_all)
+
+        _ = self.add(SettingEntry, sid=f'OnsetIntensitySpan:{file}', prow=True, column=7, width=4, padx=5,
+                     container='AppFrameImageSettingsTable', default=10, group='ImageSettingsTable', vartype=int)
+        _.tether(self[f'TextCheckbutton:{file}'], False, action=_.tether_action)
+        _.bind('<Control-1>', self.update_all)
 
     def hide_table_entry(self, file):
         for name in (f'TextCheckbutton:{file}', f'SelectionMenuRotate:{file}', f'SettingEntryAlign:{file}',
                      f'SelectionMenuMaskingMethod:{file}', f'SettingEntryMinFields:{file}',
-                     f'SelectionMenuMaskingMethod:{file}', f'SelectionMenuMaskShift:{file}'):
+                     f'SelectionMenuMaskingMethod:{file}', f'SelectionMenuMaskShift:{file}',
+                     f'SettingEntryIterativeFidelity:{file}', f'SettingEntryOnsetIntensitySpan:{file}'):
             if self.exists(name):
                 self[name].grid_remove()
 
     def show_table_entry(self, file):
         for name in (f'TextCheckbutton:{file}', f'SelectionMenuRotate:{file}', f'SettingEntryAlign:{file}',
                      f'SelectionMenuMaskingMethod:{file}', f'SettingEntryMinFields:{file}',
-                     f'SelectionMenuMaskingMethod:{file}', f'SelectionMenuMaskShift:{file}'):
+                     f'SelectionMenuMaskingMethod:{file}', f'SelectionMenuMaskShift:{file}',
+                     f'SettingEntryIterativeFidelity:{file}', f'SettingEntryOnsetIntensitySpan:{file}'):
             if self.exists(name):
                 self[name].grid()
             else:
@@ -275,8 +311,10 @@ class MultiFieldPreprocessingOptions(FieldProcessingFrame):
                 name = file.split(':')[-1]
                 if name in files:
                     self[file].set(True)
-                    for k, j in zip(('Rotate', 'MinFields', 'Align', 'MaskShift', 'MaskingMethod'),
-                                    ('SelectionMenu', 'SettingEntry', 'SettingEntry', 'SelectionMenu', 'SelectionMenu')):
+                    for k, j in zip(('Rotate', 'MinFields', 'Align', 'MaskShift', 'MaskingMethod', 'IterativeFidelity',
+                                     'OnsetIntensitySpan'),
+                                    ('SelectionMenu', 'SettingEntry', 'SettingEntry', 'SelectionMenu', 'SelectionMenu',
+                                     'SettingEntry', 'SettingEntry')):
                         self[f'{j}{k}:{name}'].set(settings['PreprocessedParameters'][name]['FieldParameters'][k])
                 else:
                     self[file].set(False)
@@ -295,16 +333,26 @@ class MultiFieldPreprocessingOptions(FieldProcessingFrame):
 
     def __add_mask(self):
         level = TopLevelWidget(self); level.title('Mask Creator')
-        _main = MultiFieldMaskCreator(level, tie=self)
-        _main.pack(fill='both', expand=True)
+        level.geometry(f'{int(self.winfo_screenwidth() * .5)}x{int(self.winfo_screenheight() * .5)}')
+        content = MultiFieldMaskCreator(level.main.interior, tie=self); content.grid()
 
     def preprocess(self):
         """Internal method that runs NTSA preprocessing according to the selected settings."""
-        if not os.path.exists(r'{}\_misc\OrientationReference.tiff'.format(self.dv_get('OutputFolder'))):
-            for file in self.files:
-                if self[f'SelectionMenuRotate:{file}'].get() == 'Auto':
+        if self.preprocess_check() is False: return
+
+        mask_data = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\masks.json',
+                                            behavior='read')[self.parent['SelectionMenuSampleType'].get()]
+        if 'OrientationReference' not in mask_data[self['SelectionMenuImageMask'].get()]:
+            for tag in self.tags['ImageSelection']:
+                file = tag.split(':')[-1]
+                if self[f'SelectionMenuRotate:{file}'].get() == 'Auto' and self[f'TextCheckbutton:{file}'].get() is True:
                     messagebox.showerror('Error', "Cannot use Rotate 'Auto' with no defined orientation reference.",)
                     return
+        else:
+            if not os.path.exists(r'{}\_misc\OrientationReference.tiff'.format(self.dv_get('OutputFolder'))):
+                supports.tprint('Orientation reference for mask {} is configured with {} from a different sample set.'.format(
+                    self['SelectionMenuImageMask'].get(),
+                    mask_data[self['SelectionMenuImageMask'].get()]['OrientationReference']['SampleName']))
 
         # extract settings and update settings json
         _ = {}
@@ -315,6 +363,8 @@ class MultiFieldPreprocessingOptions(FieldProcessingFrame):
                 'MinFields': self[f'SettingEntryMinFields:{file}'].get(),
                 'MaskingMethod': self[f'SelectionMenuMaskingMethod:{file}'].get(),
                 'MaskShift': self[f'SelectionMenuMaskShift:{file}'].get(),
+                'IterativeFidelity': self[f'SettingEntryIterativeFidelity:{file}'].get(),
+                'OnsetIntensitySpan': self[f'SettingEntryOnsetIntensitySpan:{file}'].get(),
             }
 
         update_dict = {
@@ -392,8 +442,8 @@ class SingleFieldMaskCreator(FieldMaskCreator):
         # at last update visible mask options
         if mask_name not in mask_json:  # add option to available options if it does not already exist
             self.tie['SelectionMenuImageMask'].add_option(mask_name, order=-1)
-        self.tie['SelectionMenuImageMask'].selection.set(mask_name)  # set added option as selection
-        self.parent.destroy()  # destroy mask selector
+        self.tie['SelectionMenuImageMask'].set(mask_name)  # set added option as selection
+        self.cancel_window()  # destroy mask selector
 
 
 class SingleFieldPreprocessingOptions(FieldProcessingFrame):
@@ -416,12 +466,16 @@ class SingleFieldPreprocessingOptions(FieldProcessingFrame):
         elem.trace_add('write', self.update_image_mask_cache)
 
         self.add(AppSubtitle, text='Image Settings', tooltip=True)
+        self.add(TextButton, sid='ResetImageSettingsTable', text='Reset', command=self.restore_default, warning=True,
+                 prow=True, padx=(170, 0), pady=(42, 5))
         self.add(AppFrame, sid='ImageSettingsTable')  # table container
-        self.add(TextButton, sid='ResetImageSettingsTable', text='Reset', command=self.restore_default,
-                 container='AppFrameImageSettingsTable', warning=True)
+        self.add(TextButton, sid='LoadUnPreprocessed', text='Select Unpreprocessed', command=self.select_missing,
+                 container='AppFrameImageSettingsTable')
         self.add(AppLabel, text='Align', sid='Align', prow=True, column=1, container='AppFrameImageSettingsTable',
                  padx=5, tooltip=True)
         self.add(AppLabel, text='Masking Method', sid='MaskingMethod', prow=True, column=2,
+                 container='AppFrameImageSettingsTable', padx=5, tooltip=True)
+        self.add(AppLabel, text='Fidelity', sid='IterativeFidelity', prow=True, column=3,
                  container='AppFrameImageSettingsTable', padx=5, tooltip=True)
         self.update_image_settings()
         self.add(TextButton, sid='LoadPreviousSettings', text='Load Previous Preprocessing', warning=True,
@@ -444,13 +498,20 @@ class SingleFieldPreprocessingOptions(FieldProcessingFrame):
         _.tether(self[f'TextCheckbutton:{file}'], False, action=_.tether_action)
         _.label_bind('<Control-1>', self.update_all)
 
+        _ = self.add(SettingEntry, sid=rf'IterativeFidelity:{file}', prow=True, column=3, width=6, vartype=int,
+                     container='AppFrameImageSettingsTable', default=4, padx=5, group='ImageSettingsTable')
+        _.tether(self[f'TextCheckbutton:{file}'], False, action=_.tether_action)
+        _.bind('<Control-1>', self.update_all)
+
     def hide_table_entry(self, file):
-        for name in (f'TextCheckbutton:{file}', f'SettingEntryAlign:{file}', f'SelectionMenuMaskingMethod:{file}'):
+        for name in (f'TextCheckbutton:{file}', f'SettingEntryAlign:{file}', f'SelectionMenuMaskingMethod:{file}',
+                     f'SettingEntryIterativeFidelity:{file}'):
             if self.exists(name):
                 self[name].grid_remove()
 
     def show_table_entry(self, file):
-        for name in (f'TextCheckbutton:{file}', f'SettingEntryAlign:{file}', f'SelectionMenuMaskingMethod:{file}'):
+        for name in (f'TextCheckbutton:{file}', f'SettingEntryAlign:{file}', f'SelectionMenuMaskingMethod:{file}',
+                     f'SettingEntryIterativeFidelity:{file}'):
             if self.exists(name):
                 self[name].grid()
             else:
@@ -458,8 +519,8 @@ class SingleFieldPreprocessingOptions(FieldProcessingFrame):
 
     def __add_mask(self):
         level = TopLevelWidget(self); level.title('Mask Creator')
-        _main = SingleFieldMaskCreator(level, tie=self)
-        _main.pack(fill='both', expand=True)
+        level.geometry(f'{int(self.winfo_screenwidth() * .5)}x{int(self.winfo_screenheight() * .5)}')
+        content = SingleFieldMaskCreator(level.main.interior, tie=self); content.grid()
 
     def load_previous_settings(self):
         """Method that loads the settings used during latest preprocessing."""
@@ -471,7 +532,8 @@ class SingleFieldPreprocessingOptions(FieldProcessingFrame):
                 name = file.split(':')[-1]
                 if name in files:
                     self[file].set(True)
-                    for k, j in zip(('Align', 'MaskingMethod'), ('SettingEntry', 'SelectionMenu')):
+                    for k, j in zip(('Align', 'MaskingMethod', 'IterativeFidelity'),
+                                    ('SettingEntry', 'SelectionMenu', 'SettingEntry')):
                         self[f'{j}{k}:{name}'].set(settings['PreprocessedParameters'][name]['FieldParameters'][k])
                 else:
                     self[file].set(False)
@@ -482,7 +544,7 @@ class SingleFieldPreprocessingOptions(FieldProcessingFrame):
 
     def preprocess(self):
         """Internal method that runs NTSA preprocessing according to the selected settings."""
-        # if Rotate == Auto, check if Orientation Mask has been set, otherwise prompt error and suggest OMR setup
+        if self.preprocess_check() is False: return
 
         # extract settings and update settings json
         _ = {}
@@ -490,6 +552,7 @@ class SingleFieldPreprocessingOptions(FieldProcessingFrame):
             _[file] = {
                 'Align': self[f'SettingEntryAlign:{file}'].get(),
                 'MaskingMethod': self[f'SelectionMenuMaskingMethod:{file}'].get(),
+                'IterativeFidelity': self[f'SettingEntryIterativeFidelity:{file}'].get()
             }
 
         update_dict = {
@@ -549,18 +612,15 @@ class ZeroFieldPreprocessingOptions(WindowFrame):
         files = [file for file, state in self.dv_get('SelectedFiles').items() if state is True]  # get active files
         base.RawImageHandler().handle(files)  # handle all images before preprocessing
 
-        futures = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=supports.get_max_cpu(),
                                                     mp_context=multiprocessing.get_context('spawn')) as executor:
-            for file in files:
-                future = executor.submit(base.PreprocessingHandler().preprocess, file)
-                futures.append(future)
-
-            for future, file in zip(concurrent.futures.as_completed(futures), files):
+            futures = {executor.submit(base.PreprocessingHandler().preprocess, file): file for file in files}
+            for future in concurrent.futures.as_completed(futures):
+                file = futures[future]
                 try:
                     supports.tprint(f'Preprocessed image {future.result()}.')
-                    self.dv_set('CurrentlyPreprocessingFile', future.result())
                     time.sleep(.5)  # avoid overlapping instances that may overload the GUI modules
+                    self.dv_set('LatestPreprocessedFile', future.result())
                 except Exception as exc:
                     supports.tprint('Failed to preprocess {} with exit: {!r}'.format(file, exc))
                     if self.dv_get('Debugger') is True:
@@ -583,7 +643,7 @@ class PreprocessingOptions(WindowFrame):
         _.set(self.dv_get('OutputFolder'))
         _.trace_add('write', self.__on_dir_change)
         self.add(AppLabel, text='Sample type:', sid='SampleType', tooltip=True)
-        _ = self.add(SelectionMenu, sid='SampleType', options=('Multi-Field', 'Single-Field'), prow=True,
+        _ = self.add(SelectionMenu, sid='SampleType', options=('Multi-Field', 'Single-Field', 'Zero-Field'), prow=True,
                      padx=(120, 0), width=20)
         _.trace_add('write', self.update_container_choice)
         self.add(AppLabel, text='Mask channel:', sid='MaskChannel', tooltip=True)
@@ -620,6 +680,9 @@ class PreprocessingOptions(WindowFrame):
         if self['SelectionMenuMaskChannel']['state'] == 'disabled':
             self['SelectionMenuMaskChannel'].enable()
             self['LoadingCircleMaskChannel'].stop()
+        elif not self.dv_get('AvailableChannels'):
+            self['SelectionMenuMaskChannel'].disable()
+            self['LoadingCircleMaskChannel'].start()
         self['SelectionMenuMaskChannel'].update_options(self.dv_get('AvailableChannels'))
 
     def __on_dir_change(self, *_):
@@ -632,89 +695,92 @@ class PreprocessingOptions(WindowFrame):
 class MaskGallery(WindowFrame):
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
-        self.memory = {}
         self.mask_folder = None
         self.settings = None
+        self.selected_files = None
 
     def __traces__(self):
-        self.dv_trace('CurrentlyPreprocessingFile', 'write', self.update_gallery)
+        self.dv_trace('LatestPreprocessedFile', 'write', self.__auto_load_image)
         self.dv_trace('InputFolder', 'write', self.clear)
+        self.dv_trace('OutputFolder', 'write', self.clear)
 
     def __base__(self):
+        self.mask_folder = mask_folder = r'{}\_masks for manual control'.format(self.dv_get('OutputFolder'))
+        self.selected_files = [k for k, v in self.dv_get('SelectedFiles').items() if v is True]
+
         self.add(AppTitle, text='Mask Gallery')
         self.add(AppFrame, sid='ImageContainer')
-        self.update_gallery()
 
-    def clear(self, *_):
-        self.memory = {}
-        super().clear()
+        # construct placeholder containers
+        for file in supports.sort(self.selected_files):
+            self.add(AppFrame, sid=f':{file}:Container', container='AppFrameImageContainer', pady=(0, 10))
 
-    def reload(self):
-        self.memory = {}
-        super().reload()
+        # load existing masks upon initial tab load
+        if os.path.exists(mask_folder):
+            for file in supports.sort(self.selected_files):
+                if os.path.isfile(rf'{mask_folder}/{file}.png'):
+                    self.load_image(file)
 
-    def update_gallery(self, *_):
-        self.mask_folder = mask_folder = r'{}\_masks for manual control'.format(self.dv_get('OutputFolder'))
-        self.settings = supports.json_dict_push(r'{}\Settings.json'.format(self.dv_get('OutputFolder')), behavior='read')
-
-        if not os.path.exists(mask_folder):
-            os.makedirs(mask_folder)
-
-        selected_files = [k + '.png' for k, v in self.dv_get('SelectedFiles').items() if v is True]
-        masks = [i.removesuffix('.png') for i in os.listdir(mask_folder) if i in selected_files]
-
-        for k, v in self.memory.copy().items():
-            if k not in self.dv_get('SelectedFiles') or v['MTIME'] != os.path.getmtime(rf'{mask_folder}\{k}.png'):
-                self.drop(v['ID'])
-                del self.memory[k]
-
-        self.load_images(masks)
+    def __auto_load_image(self, *_):
+        """Internal method that automatically loads the latest preprocessed mask image into the gallery. The image is
+        only loaded if the __base__ has been called prior to calling this method."""
+        if self.is_empty() is False:
+            image = self.dv_get('LatestPreprocessedFile')
+            self.load_image(image)
 
     @supports.thread_daemon
-    def load_images(self, masks):
-        for mask in masks:
-            if mask not in self.memory:
-                mask_path = rf'{self.mask_folder}\{mask}.png'
+    def load_image(self, image):
+        self.settings = supports.json_dict_push(r'{}\Settings.json'.format(self.dv_get('OutputFolder')),
+                                                behavior='read')
+        self.container_drop(f'AppFrame:{image}:Container')  # drop image container contents
+        self.container_drop(f'AppFrame:{image}:Metadata')  # drop metadata container contents
+        mask_path = rf'{self.mask_folder}\{image}.png'
 
-                # construct image container
-                elem = self.add(AppFrame, sid=f':{mask}:Container', container='AppFrameImageContainer', overwrite=True)
+        # place image in container and store to memory
+        _ = self.add(ZoomImageFrame, sid=f':{image}', container=f'AppFrame:{image}:Container')
+        _.scroll_scalar = (.75, .75)
+        _.set_image(path=mask_path)
 
-                # place image in container and store to memory
-                _ = self.add(ZoomImageFrame, sid=f':{mask}', container=f'AppFrame:{mask}:Container', overwrite=True)
-                _.scroll_scalar = (.75, .75)
-                _.set(path=mask_path)
-                self.memory[mask] = {'ID': elem.tkID, 'MTIME': _.mtime}
+        # place metadata in a container next to the image
+        self.add(AppFrame, sid=f':{image}:Metadata', container=f'AppFrame:{image}:Container',
+                 prow=True, column=1, sticky='n', padx=(20, 0))
+        self.add(AppSubtitle, text=image, sid=f':{image}', container=f'AppFrame:{image}:Metadata',
+                 pady=(0, 15))
 
-                # place metadata in a container next to the image
-                self.add(AppFrame, sid=f':{mask}:Metadata', container=f'AppFrame:{mask}:Container',
-                               prow=True, column=1, sticky='n', padx=(20, 0), overwrite=True)
-                self.add(AppSubtitle, text=mask, sid=f':{mask}', container=f'AppFrame:{mask}:Metadata', 
-                         pady=(0, 15), overwrite=True)
+        try:
+            md = self.settings['PreprocessedParameters'][image]
+            _l1 = ('Quality: Tier {Level:.2f} with Area Deviation {AreaError:.1f}%, and Ratio Deviation '
+                   '{RatioError:.3f}%\n\n').format(**md['QualityParameters'])
+            _l1 += 'Field Size: ({}, {}), Align Angle: {}°, Scale: {} pix:µm\n\n'.format(
+                int(round(md['FieldParameters']['Width'], 0)),
+                int(round(md['FieldParameters']['Height'], 0)), round(md['FieldParameters']['Align'], 3),
+                round(md['FieldParameters']['ScaleBar'], 3))
+            if self.settings['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
+                _l1 += ('Masked with {MaskingMethod!r} and Rotated {Rotate}° with Certainty '
+                        '{RotationCertainty:.1f} and Matrix Uniformity {ComparedMatrixUniformity:.3f}').format(
+                    **md['FieldParameters'])
+            elif self.settings['CollectionPreprocessSettings']['SampleType'] == 'Single-Field':
+                _l1 += 'Masked with {MaskingMethod!r} and Threshold Parameter {TP}'.format(
+                    **md['FieldParameters'])
 
-                md = self.settings['PreprocessedParameters'][mask]
-                _l1 = ('Quality: Tier {Level:.2f} with Area Deviation {AreaError:.1f}%, and Ratio Deviation '
-                       '{RatioError:.3f}%\n\n').format(**md['QualityParameters'])
-                _l1 += 'Field Size: ({}, {}), Align Angle: {}°, Scale: {} pix:µm\n\n'.format(
-                    int(round(md['FieldParameters']['Width'], 0)),
-                    int(round(md['FieldParameters']['Height'], 0)), round(md['FieldParameters']['Align'], 3),
-                    round(md['FieldParameters']['ScaleBar'], 3))
-                if self.settings['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
-                    _l1 += ('Masked with {MaskingMethod!r} and Rotated {Rotate}° with Certainty '
-                            '{RotationCertainty:.1f} and Matrix Uniformity {ComparedMatrixUniformity:.3f}').format(
-                        **md['FieldParameters'])
-                elif self.settings['CollectionPreprocessSettings']['SampleType'] == 'Single-Field':
-                    _l1 += 'Masked with {MaskingMethod!r} and Threshold Parameter {TP}'.format(
-                        **md['FieldParameters'])
+            self.add(AppLabel, text=_l1, sid=f':{image}', container=f'AppFrame:{image}:Metadata', justify='left',
+                     overwrite=True)
+        except KeyError as e:
+            if self.dv_get('Debugger') is True:
+                supports.tprint(f'Parameter load-in for image mask {image} failed with {e!r}.')
 
-                # ::: add shift parameters once ready :::
+        self.add(TextButton, text='View Mask', function='open_image', data=mask_path, overwrite=True,
+                 sid=f'LowRes:{image}', container=f'AppFrame:{image}:Metadata')
+        hr_path = r'{}\{}\StructureMask.tiff'.format(self.dv_get('OutputFolder'), image)
+        self.add(TextButton, text='View Hi-Res Mask', function='open_image', data=hr_path, overwrite=True,
+                 sid=f'HiRes:{image}', container=f'AppFrame:{image}:Metadata')
 
-                self.add(AppLabel, text=_l1, sid=f':{mask}', container=f'AppFrame:{mask}:Metadata', justify='left',
-                         overwrite=True)
-                self.add(TextButton, text='View Mask', function='open_image', data=mask_path, overwrite=True,
-                             sid=f'LowRes:{mask}', container=f'AppFrame:{mask}:Metadata')
-                hr_path = r'{}\{}\StructureMask.tiff'.format(self.dv_get('OutputFolder'), mask)
-                self.add(TextButton, text='View Hi-Res Mask', function='open_image', data=hr_path, overwrite=True,
-                             sid=f'HiRes:{mask}', container=f'AppFrame:{mask}:Metadata')
+    def load(self):
+        if not self.is_empty():
+            if len(self.selected_files) != len(self.dv_get('SelectedFiles')):
+                self.reload()
+        else:
+            super().load()
 
 
 class ProcessingOptions(WindowFrame):
@@ -735,22 +801,48 @@ class ProcessingOptions(WindowFrame):
         self.add(AppTitle, text='Processing')
 
         # global cell count settings
-        self.add(AppSubtitle, text='Global Cell Count Settings')
+        self.add(AppSubtitle, text='General Processing Settings')
+
         self.add(AppLabel, text='Edge exclusion distance (µm):', sid='EdgeExclusionDistance', tooltip=True)
-        self.add(SettingEntry, sid='EdgeExclusionDistance', vartype=int, default=50, prow=True,
-                     column=0, padx=(220, 0))
+        self.add(SettingEntry, sid='EdgeExclusionDistance', vartype=int, default=50, prow=True, column=0, padx=(220, 0))
+
+        self.add(AppLabel, text='Seeding density (c/cm²):', sid='SeedingDensity')
+        self.add(SettingEntry, sid='SeedingDensity', vartype=int, prow=True, column=0, padx=(220, 0))
+
         self.add(AppLabel, text='Cell type:', sid='CellType', tooltip=True)
         _ = ('Fibroblast', 'MC3T3', 'Add ...')
-        self.add(SelectionMenu, sid='CellType', options=_, default=0, prow=True, column=0, padx=(80, 0))
-        self.add(AppLabel, text='Channel:', sid='CellChannel', tooltip=True)
-        self.add(SelectionMenu, sid='CellChannel', options=self.dv_get('AvailableChannels'), prow=True,
-                 column=0, padx=(80, 0))
+        self.add(SelectionMenu, sid='CellType', options=_, default=0, prow=True, column=0, padx=(75, 0))
+
+        # nuclei processing settings
+        _ = self.add(AppCheckbutton, text='Nuclei Processing')
+        self.add(AppFrame, sid='NucleiProcessingSettings', padx=(22, 0), pady=(5, 20))
+        self.add(AppLabel, text='Nuclei channel:', sid='NucleiChannel', tooltip=True, padx=(0, 10),
+                 container='AppFrameNucleiProcessingSettings')
+        self.add(SelectionMenu, sid='NucleiChannel', options=self.dv_get('AvailableChannels'), prow=True, column=1,
+                 container='AppFrameNucleiProcessingSettings')
+        _.trace_add('write', self.__set_up_np_settings)
+
+        # morphology processing settings
+        _ = self.add(AppCheckbutton, text='Morphology Processing')
+        self.add(AppFrame, sid='MorphologyProcessingSettings', padx=(22, 0), pady=(5, 20))
+        self.add(AppLabel, text='Morphology channel:', sid='MorphologyChannel', tooltip=True, padx=(0, 10),
+                 container='AppFrameMorphologyProcessingSettings')
+        self.add(SelectionMenu, sid='MorphologyChannel', options=self.dv_get('AvailableChannels'), column=1, prow=True,
+                 container='AppFrameMorphologyProcessingSettings')
+
+        self.add(AppLabel, text='Threshold intensity:', sid=f'ThresholdIntensity', tooltip=True, padx=(0, 10),
+                 container='AppFrameMorphologyProcessingSettings')
+        self.add(SettingEntry, sid='ThresholdIntensity', vartype=int, default=0, prow=True, column=1,
+                 container='AppFrameMorphologyProcessingSettings')
+        _.trace_add('write', self.__set_up_mp_settings)
 
         # cell counting settings
-        self.add(AppSubtitle, text='Cell Counting', tooltip=True)
-        self.add(AppFrame, sid='CellCountingTable')  # table container
+        self.add(AppSubtitle, text='Cell Counting Settings', tooltip=True)
         self.add(TextButton, sid='ResetCellCountingTable', text='Reset', command=self.restore_default, warning=True,
-                     container='AppFrameCellCountingTable')
+                 prow=True, padx=(250, 0), pady=(42, 5))
+        self.add(AppFrame, sid='CellCountingTable')  # table container
+        self.add(TextButton, sid='LoadUnprocessed', text='Select Unprocessed', command=self.select_missing,
+                 container='AppFrameCellCountingTable')
         self.add(AppLabel, text='Counting Method', sid='CountingMethod', prow=True, column=1, padx=5, tooltip=True,
                    container='AppFrameCellCountingTable')
         self.add(AppLabel, text='Slice Size', sid='SliceSize', prow=True, column=2, tooltip=True,
@@ -769,8 +861,29 @@ class ProcessingOptions(WindowFrame):
 
         self.__update_counting_table_options()
 
+    def __set_up_np_settings(self, *_):
+        if self['AppCheckbuttonNucleiProcessing'].get() is True:
+            self['AppFrameNucleiProcessingSettings'].grid()
+        else:
+            self['AppFrameNucleiProcessingSettings'].grid_remove()
+
+    def __set_up_mp_settings(self, *_):
+        if self['AppCheckbuttonMorphologyProcessing'].get() is True:
+            self['AppFrameMorphologyProcessingSettings'].grid()
+        else:
+            self['AppFrameMorphologyProcessingSettings'].grid_remove()
+
+    def select_missing(self):
+        """Attempt to determine which files are yet to be processed and selected those files for processing."""
+        for f in self.dv_get('SelectedFiles'):
+            if os.path.isfile(r'{}\{}\data.json'.format(self.dv_get('OutputFolder'), f)):
+                self[f'TextCheckbutton:{f}'].set(False)
+            elif self.exists(f'TextCheckbutton:{f}'):
+                self[f'TextCheckbutton:{f}'].set(True)
+
     def __update_channel_selection_menu(self, *_):
-        self['SelectionMenuCellChannel'].update_options(self.dv_get('AvailableChannels'))
+        self['SelectionMenuNucleiChannel'].update_options(self.dv_get('AvailableChannels'))
+        self['SelectionMenuMorphologyChannel'].update_options(self.dv_get('AvailableChannels'))
 
     def update_counting_settings(self, *_):
         """Internal method that updates setting table."""
@@ -854,7 +967,10 @@ class ProcessingOptions(WindowFrame):
                 self[file].set(False)
         self['SettingEntryEdgeExclusionDistance'].set(settings['CollectionProcessSettings']['EdgeProximity'])
         self['SelectionMenuCellType'].set(settings['CollectionProcessSettings']['CellType'])
-        self['SelectionMenuCellChannel'].set(settings['CollectionProcessSettings']['CellChannel'])
+        self['SelectionMenuNucleiChannel'].set(settings['CollectionProcessSettings']['NucleiChannel'])
+        self['SelectionMenuMorphologyChannel'].set(settings['CollectionProcessSettings']['MorphologyChannel'])
+        self['SettingEntryThresholdIntensity'].set(settings['CollectionProcessSettings']['ThresholdIntensity'])
+        self['SettingEntrySeedingDensity'].set(settings['CollectionProcessSettings']['SeedingDensity'])
 
     def __update_counting_table_options(self, *_):
         """Internal method that updates cell counting settings depending on selected counting method."""
@@ -886,8 +1002,6 @@ class ProcessingOptions(WindowFrame):
         else:
             self[f'AppLabelSliceSize'].grid()
 
-
-
     def __update_all(self, e):
         """Internal method that updates all cell counting methods."""
         last_click = self.dv_get('LastClick')
@@ -916,10 +1030,30 @@ class ProcessingOptions(WindowFrame):
             'CollectionProcessSettings': {
                 'EdgeProximity': self['SettingEntryEdgeExclusionDistance'].get(),
                 'CellType': self['SelectionMenuCellType'].get(),
-                'CellChannel': self['SelectionMenuCellChannel'].get(),
+                'ThresholdIntensity': self['SettingEntryThresholdIntensity'].get(),
+                'SeedingDensity': self['SettingEntrySeedingDensity'].get(),
             },
             'IndividualProcessSettings': _
         }
+
+        # check what types of analysis should be performed
+        if self['AppCheckbuttonNucleiProcessing'].get() is False:
+            update_dict['CollectionProcessSettings']['NucleiChannel'] = None
+        else:
+            if self['SelectionMenuNucleiChannel'].get() == 'Select Option':
+                messagebox.showerror('Missing Nuclei Channel', 'Set a color channel for nuclei processing.',
+                                     parent=self)
+            else:
+                update_dict['CollectionProcessSettings']['NucleiChannel'] = self['SelectionMenuNucleiChannel'].get()
+
+        if self['AppCheckbuttonMorphologyProcessing'].get() is False:
+            update_dict['CollectionProcessSettings']['MorphologyChannel'] = None
+        else:
+            if self['SelectionMenuMorphologyChannel'].get() == 'Select Option':
+                messagebox.showerror('Missing Morphology Channel', 'Set a color channel for morphology processing.',
+                                     parent=self)
+            else:
+                update_dict['CollectionProcessSettings']['MorphologyChannel'] = self['SelectionMenuMorphologyChannel'].get()
 
         supports.json_dict_push(r'{}\Settings.json'.format(self.dv_get('OutputFolder')), params=update_dict,
                             behavior='update')  # update settings json
@@ -931,17 +1065,17 @@ class ProcessingOptions(WindowFrame):
     def process_daemon(self):
         files = [file for file in self.__files if self[f'TextCheckbutton:{file}'].get() is True]  # get active files
 
-
-
-        futures = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=supports.get_max_cpu(),
                                                     mp_context=multiprocessing.get_context('spawn')) as executor:
-            for file in files:
-                future = executor.submit(base.ProcessingHandler().process, file)
-                futures.append(future)
-
+            futures = {executor.submit(base.ProcessingHandler().process, file): file for file in files}
             for future in concurrent.futures.as_completed(futures):
-                supports.tprint(f'Processed image {future.result()}.')
+                file = futures[future]
+                try:
+                    supports.tprint(f'Processed image {future.result()}.')
+                except Exception as e:
+                    supports.tprint(f'Failed to process {file} with exit: {e!r}.')
+                    if self.dv_get('Debugger') is True:
+                        raise e
         supports.tprint('Completed all processing.')
 
 
@@ -982,8 +1116,6 @@ class MultiFieldMaskCreator(FieldMaskCreator):
         self.add(AppLabel, text='Rows:', sid='Rows')
         _row = self.add(SettingEntry, sid='Rows', prow=True, padx=(100, 0), width=2, vartype=int)
 
-        # self.EntryGrid = EntryGrid(self, vargrid=(_row.entry, _col.entry), gap=2)
-        # self.EntryGrid.grid(row=10, column=0)
         self.add(EntryGrid, sid='Mask', vargrid=(_row.entry, _col.entry), gap=2)
         _col.trace_add('write', self['EntryGridMask'].setup_grid)
         _row.trace_add('write', self['EntryGridMask'].setup_grid)
@@ -1047,8 +1179,8 @@ class MultiFieldMaskCreator(FieldMaskCreator):
         # at last update visible mask options
         if mask_name not in mask_json:  # add option to available options if it does not already exist
             self.tie['SelectionMenuImageMask'].add_option(mask_name, order=-1)
-        self.tie['SelectionMenuImageMask'].selection.set(mask_name)  # set added option as selection
-        self.parent.destroy()  # destroy mask selector
+        self.tie['SelectionMenuImageMask'].set(mask_name)
+        self.cancel_window()
 
     def __open_mask(self):
         """Internal method that opens an existing mask and imports all its settings."""
@@ -1092,19 +1224,21 @@ class OrientationReferenceCreator(PopupWindow):
     def __base__(self):
         self.add(AppSubtitle, text='Reference Setup', pady=(0, 5))
         self.add(AppLabel, text='Reference File:', sid='SampleName', tooltip=True)
-        _ = [i.removesuffix('.vsi') for i in os.listdir(self.tie.dv_get('InputFolder')) if i.endswith('.vsi')]
+        _ = supports.sort([i.removesuffix('.vsi') for i in os.listdir(self.tie.dv_get('InputFolder')) if
+                           i.endswith('.vsi')])
         _ = self.add(SelectionMenu, options=_, sid='SampleName', prow=True, padx=(150,0), width=20)
         _.trace_add('write', self.__load_reference_image_mt)
 
         self.add(AppLabel, text='Minimum Fields:')
         self.add(SettingEntry, sid='MinFields', prow=True, padx=(150, 0), vartype=int, default=6,
                      width=20)
-        self.add(AppLabel, text='Masking Method:')
-        self.add(SelectionMenu, options=('Calculate', 'Hybrid'),
-                     sid='MaskingMethod', prow=True, padx=(150, 0), width=20, default=0)
         self.add(AppLabel, text='Mask Shift:')
         self.add(SelectionMenu, options=('None', 'Auto'), sid='MaskShift', prow=True, padx=(150, 0),
                      default=0, width=20)
+        self.add(AppLabel, text='Fidelity:')
+        self.add(SettingEntry, sid='Fidelity', prow=True, padx=(150, 0), width=20, default=3, vartype=int,)
+        self.add(AppLabel, text='Span:')
+        self.add(SettingEntry, sid='Span', prow=True, padx=(150, 0), width=20, default=10, vartype=int,)
 
         # construct placeholder for preview image
         self.add(AppSubtitle, text='Reference Orientation')
@@ -1143,12 +1277,14 @@ class OrientationReferenceCreator(PopupWindow):
             'OrientationReference': {
                 'SampleName': self['SelectionMenuSampleName'].get(),
                 'MinFields': self['SettingEntryMinFields'].get(),
-                'MaskingMethod': self['SelectionMenuMaskingMethod'].get(),
+                'MaskingMethod': 'Calculate',
                 'MaskShift': self['SelectionMenuMaskShift'].get(),
                 'ScaleBar': scale_bar,
                 'Rotate': self.rotation.get(),
                 'RotateMethod': 'Manual',
-                'Align': None
+                'Align': None,
+                'IterativeFidelity': self['SettingEntryFidelity'].get(),
+                'OnsetIntensitySpan': self['SettingEntrySpan'].get()
         }}}}
 
         supports.json_dict_push(rf'{supports.__cwd__}\__misc__\masks.json', params=update_dict, behavior='update')
@@ -1183,7 +1319,7 @@ class OrientationReferenceCreator(PopupWindow):
         _ = 1.8 if self['AppCheckbuttonEnhancePreview'].get() is True else 1
         if self['AppCheckbuttonHiResPreview'].get() is True:
             self['ZoomImageFramePreviewImage'].scroll_scalar = (1, 1)
-            self['ZoomImageFramePreviewImage'].set(path=channel_path, brighten=_, rotate=self.rotation.get())
+            self['ZoomImageFramePreviewImage'].set_image(path=channel_path, brighten=_, rotate=self.rotation.get())
         else:
             self['ZoomImageFramePreviewImage'].scroll_scalar = (.75, .75)
             lr_path = r'{}\{}_preview.tiff'.format(dump_path, file)
@@ -1192,7 +1328,7 @@ class OrientationReferenceCreator(PopupWindow):
                 img = base.criterion_resize(img)
                 cv2.imwrite(lr_path, img)
 
-            self['ZoomImageFramePreviewImage'].set(path=lr_path, brighten=_, rotate=self.rotation.get())
+            self['ZoomImageFramePreviewImage'].set_image(path=lr_path, brighten=_, rotate=self.rotation.get())
         self.__load_mask_image(brighten=_)
         self['LoadingCircleCreateMask'].stop()
 
@@ -1206,7 +1342,7 @@ class OrientationReferenceCreator(PopupWindow):
             load_path = r'{}\_misc\OrientationReference.tiff'.format(self.tie.dv_get('OutputFolder'))
 
         if os.path.isfile(load_path):
-            self['ZoomImageFramePreviewMask'].set(path=load_path, **kwargs)
+            self['ZoomImageFramePreviewMask'].set_image(path=load_path, **kwargs)
 
     @supports.thread_daemon
     def create_mask(self):
@@ -1236,6 +1372,7 @@ class PresentationMaskCreator(MaskCreatorWindow):
         self.add(AppCheckbutton, text='Enable TeX', sid='UseTex', default=False)
         self.add(AppCheckbutton, text='Convert fields to TeX math', sid='TexMath', default=False)
         _ = self.add(AppCheckbutton, text='Raw string', sid='RawString', default=False)
+        self.add(AppCheckbutton, text='Convert to numbers', sid='Numbers', default=False)
         _.tether(self['AppCheckbuttonTexMath'], True, action=_.tether_action)
         _.tether(self['AppCheckbuttonUseTex'], True, action=_.tether_action)
 
@@ -1312,6 +1449,7 @@ class PresentationMaskCreator(MaskCreatorWindow):
                 'UseTex': self['AppCheckbuttonUseTex'].get(),
                 'TexMath': self['AppCheckbuttonTexMath'].get(),
                 'RawString': self['AppCheckbuttonRawString'].get(),
+                'Numbers': self['AppCheckbuttonNumbers'].get(),
                 'Enabled': mask_state
             }}}
             supports.json_dict_push(json_path, params=update_dict, behavior='update')  # update presentation_masks.json
@@ -1329,7 +1467,7 @@ class PresentationMaskCreator(MaskCreatorWindow):
                 self.tie['SelectionMenuPresentationMask'].add_option(mask_name, order=-1)
             self.tie['SelectionMenuPresentationMask'].set(mask_name)  # set added option as selection
 
-            self.parent.destroy()  # destroy mask selector
+            self.cancel_window()  # destroy mask selector
 
     def __import_presentation_mask(self):
         """Internal method that imports a mask file into the presentation mask creator."""
@@ -1446,9 +1584,6 @@ class FieldSortingCreator(PopupWindow):
         if sorting_name == '':  # catch missing name
             messagebox.showerror('Missing Name', 'Set a name for the field sorting before proceeding.',
                                  parent=self.parent)
-        elif self['SettingEntryDelimiters'].get() == '':
-            messagebox.showerror('Missing Delimiters', 'Set delimiters for the field sorting.',
-                                 parent=self.parent)
         else:
             # fetch existing field sorting entries
             sorting_json = supports.json_dict_push(json_path, behavior='read')
@@ -1481,14 +1616,17 @@ class FieldSortingCreator(PopupWindow):
                 self.tie['SelectionMenuFieldSorting'].add_option(sorting_name, order=-1)
             self.tie['SelectionMenuFieldSorting'].set(sorting_name)  # set added option as selection
 
-            self.parent.destroy()  # destroy sorting creator
+            self.cancel_window()  # destroy sorting creator
 
     def cancel_window(self):
         """Update cancel window functionality to insert fallback setting."""
-        fallback = self.tie['SelectionMenuFieldSorting'].previous
-        if fallback == 'Add ...':
-            fallback = self.tie['SelectionMenuFieldSorting'].default
-        self.tie['SelectionMenuFieldSorting'].selection.set(fallback)  # set fallback option as selection
+        # define fallback functionality to prevent the 'Add ...' selection to ever be selected as the mask
+        current = self.tie['SelectionMenuFieldSorting'].get(); previous = self.tie['SelectionMenuFieldSorting'].previous
+        if current == 'Add ...':
+            if previous == 'Add ...':
+                self.tie['SelectionMenuFieldSorting'].set(self.tie['SelectionMenuFieldSorting'].default)
+            else:
+                self.tie['SelectionMenuFieldSorting'].set(previous)
         super().cancel_window()
 
 
@@ -1531,6 +1669,275 @@ class GroupEditEntry(AppEntry):
             self.frame[f'GroupNameEntry:{tie}'].get_tethered('target').set(False)
 
 
+class MultiGroupCreator(PopupWindow):
+    def __init__(self, parent, tie, *args, **kwargs):
+        super().__init__(parent, *args, **kwargs)
+        self.tie = tie
+        self.__mg_handler = base.MultiGroupHandler(list(self.tie.groups.get()))
+        self.tags['RenameMultiGroups'] = []; self.mg_dg_names = None
+        self.load()
+
+    def __base__(self):
+        self.add(AppSubtitle, text='Multi-Group Setup', pady=(0, 5))
+        self.add(AppLabel, text='Grouping type:', sid='GroupingType')
+        self.add(SelectionMenu, options=('Index', 'Manual'), sid='GroupingType', padx=(120, 0), prow=True,
+                        default=0, width=7)
+
+        # index grouping
+        self.add(AppFrame, sid='IndexContainer')
+        _ = self.add(AppCheckbutton, text='White space delimiting', sid='WhiteSpaceDelimit', default=False,
+                     container='AppFrameIndexContainer')
+        self.add(AppLabel, text='Delimiters:', sid='Delimiters', container='AppFrameIndexContainer')
+        elem = self.add(SettingEntry, sid='Delimiters', prow=True, padx=(90, 0), width=25,
+                        container='AppFrameIndexContainer')
+        elem.tether_action['selection'] = ' '
+        elem.tether(_, True, elem.tether_action)
+        elem.trace_add('write', self.update_groups)
+
+        elem = self.add(AppCheckbutton, text='Split with Regular Expression', sid='UseRegex', default=False,
+                        container='AppFrameIndexContainer')
+        elem.tether_action['selection'] = False
+        elem.tether(_, True, elem.tether_action)
+        elem.trace_add('write', self.update_groups)
+
+        elem = self.add(AppCheckbutton, text='Respect White Space', sid='RecWhiteSpace', default=False,
+                        container='AppFrameIndexContainer')
+        elem.tether_action['selection'] = True
+        elem.tether(_, True, elem.tether_action)
+        elem.trace_add('write', self.update_groups)
+
+        self.add(AppLabel, text='Multiple Letters Separator:', sid='MultiLetterSeparator',
+                 container='AppFrameIndexContainer')
+        elem = self.add(SettingEntry, sid='MultiLetterSeparator', prow=True, padx=(200, 0), width=7,
+                        container='AppFrameIndexContainer')
+        elem.tether_action['selection'] = ''
+        elem.tether(_, True, elem.tether_action)
+        elem.trace_add('write', self.update_groups)
+
+        self.add(AppLabel, text='Group index:', sid='GroupIndex', container='AppFrameIndexContainer')
+        elem = self.add(SettingEntry, sid='GroupIndex', prow=True, padx=(100, 0), width=7, vartype=int,
+                 container='AppFrameIndexContainer')
+        elem.trace_add('write', self.update_groups)
+
+        # manual grouping
+        self.add(AppFrame, sid='ManualContainer')
+        self.add(AppLabel, text='Groups:', sid='NumberGroups', container='AppFrameManualContainer')
+
+        self['SelectionMenuGroupingType'].trace_add('write', self.__toggle_grouping_type)
+        self.__toggle_grouping_type()
+
+        # edit groups
+        self.add(AppSubtitle, text='Edit')
+        self.add(AppFrame, sid='EditContainer')
+        _ = self.add(AppCheckbutton, text='Rename multi-groups', sid='RenameMGs', default=False,
+                 container='AppFrameEditContainer')
+        self.add(AppFrame, sid='RenameMGContainer', padx=(22, 0), pady=(5, 20), container='AppFrameEditContainer')
+        _.trace_add('write', self.__toggle_rename_table)
+        self['AppFrameRenameMGContainer'].grid_remove()
+
+        _ = self.add(AppCheckbutton, text='Bulk edit group names', sid='BulkGroupEdit', default=False,
+                 container='AppFrameEditContainer')
+        self.add(AppFrame, sid='BGEContainer', padx=(22, 0), pady=(5, 20), container='AppFrameEditContainer')
+        self.add(AppLabel, text='Delimiter:', sid='BGEDelimiter', container='AppFrameBGEContainer')
+        elem = self.add(SettingEntry, sid='BGEDelimiter', prow=True, padx=(10, 0), column=1, width=1,
+                 container='AppFrameBGEContainer')
+        elem.trace_add('write', self.__edit_group_names)
+
+        self.add(AppLabel, text='Target:', sid='BGETarget', container='AppFrameBGEContainer')
+        elem = self.add(SettingEntry, sid='BGETarget', prow=True, padx=(10, 0), column=1, width=20,
+                 container='AppFrameBGEContainer')
+        elem.trace_add('write', self.__edit_group_names)
+
+        self.add(AppLabel, text='Replacement:', sid='BGEReplacement', container='AppFrameBGEContainer')
+        elem = self.add(SettingEntry, sid='BGEReplacement', prow=True, padx=(10, 0), column=1, width=20,
+                 container='AppFrameBGEContainer')
+        elem.trace_add('write', self.__edit_group_names)
+
+        _.trace_add('write', self.__toggle_bulk_edit_table)
+        self['AppFrameBGEContainer'].grid_remove()
+
+        # group examples
+        self.add(AppSubtitle, text='Groups')
+        self.add(AppFrame, sid='GroupContainer')
+
+        self.add(AppLabel, text='Multi-Group Name:', sid='MultiGroupName')
+        self.add(SettingEntry, sid='MultiGroupName', prow=True, padx=(170, 0), width=25)
+
+        self.add(AppButton, text='Save Multi-Group Setup', command=self.__save_multi_group_setup, pady=(5, 0))
+        self.add(AppButton, text='Cancel', command=self.cancel_window, pady=(5, 0), padx=(240, 0), prow=True)
+
+    def __edit_group_names(self, *_):
+        if self.__mg_handler.multi_groups is not None:
+            delimiter = self['SettingEntryBGEDelimiter'].get()
+            target_string = self['SettingEntryBGETarget'].get()
+            replacement_string = self['SettingEntryBGEReplacement'].get()
+            if delimiter == '':
+                targets = [target_string]; replacements = [replacement_string]
+            else:
+                targets = target_string.split(delimiter)
+                if delimiter in replacement_string:
+                    replacements = replacement_string.split(delimiter)
+                else:
+                    replacements = [replacement_string] * len(targets)
+
+            _ = {}
+            for mg, g in self.__mg_handler.multi_groups.items():
+                _[mg] = {}
+                for group, display in g.items():
+                    for t, r in zip(targets, replacements):
+                        display = display.replace(t, r)
+                    _[mg][group] = display
+                    self[f'AppLabel{mg}:{group}:IGN']['text'] = display
+            self.mg_dg_names = _
+
+    def __toggle_bulk_edit_table(self, *_):
+        if self['AppCheckbuttonBulkGroupEdit'].get() is True and self.__mg_handler.multi_groups is not None:
+            self['AppFrameBGEContainer'].grid()
+        else:
+            self['AppFrameBGEContainer'].grid_remove()
+            if self.__mg_handler.multi_groups is not None:
+                for mg, g in self.__mg_handler.multi_groups.items():
+                    for group, display in g.items():
+                        try:  # a KeyError can arise if this is triggered simultaneously with a new index definition
+                            self[f'AppLabel{mg}:{group}:IGN']['text'] = display
+                        except KeyError:
+                            pass
+            self.mg_dg_names = self.__mg_handler.multi_groups
+
+    def __toggle_rename_table(self, *_):
+        if self['AppCheckbuttonRenameMGs'].get() is True and self.__mg_handler.multi_groups is not None:
+            self['AppFrameRenameMGContainer'].grid()
+            if self.__mg_handler.multi_groups is not None:
+                self.container_drop('AppFrameRenameMGContainer'); self.tags['RenameMultiGroups'] = []
+                for mg in self.__mg_handler.multi_groups.keys():
+                    self.add(AppLabel, text=mg, sid=f'MultiGroup:{mg}', container='AppFrameRenameMGContainer',
+                             pady=(2, 5), font='Arial 12 bold')
+                    _ = self.add(SettingEntry, text=mg, sid=f'MultiGroup:{mg}', container='AppFrameRenameMGContainer',
+                             prow=True, column=1, width=15, tag='RenameMultiGroups', padx=(10, 0))
+                    _.trace_add('write', self.__edit_multi_group_name)
+        else:
+            self['AppFrameRenameMGContainer'].grid_remove()
+            for k in self.tags['RenameMultiGroups']:
+                mg = k.split(':')[-1]
+                self[f'AppLabel{mg}']['text'] = mg
+
+    def __edit_multi_group_name(self, *_):
+        for k in self.tags['RenameMultiGroups']:
+            mg = k.split(':')[-1]
+            if self[k].get() != '':
+                self[f'AppLabel{mg}']['text'] = self[k].get()
+            else:
+                self[f'AppLabel{mg}']['text'] = mg
+
+    def __toggle_grouping_type(self, *_):
+        if self['SelectionMenuGroupingType'].get() == 'Index':
+            self['AppFrameManualContainer'].grid_remove(); self['AppFrameIndexContainer'].grid()
+        elif self['SelectionMenuGroupingType'].get() == 'Manual':
+            self['AppFrameIndexContainer'].grid_remove(); self['AppFrameManualContainer'].grid()
+
+    def update_groups(self, *_):
+        """Method that updates the group list if there are delimiters."""
+        if self['SettingEntryDelimiters'].get() != '' and self['SettingEntryGroupIndex'].get() != '':
+            try:
+                self.container_drop('AppFrameGroupContainer')
+                self.__mg_handler.split_codes(delimiters=self['SettingEntryDelimiters'].get(),
+                                       regex=self['AppCheckbuttonUseRegex'].get(),
+                                       white_space=self['AppCheckbuttonRecWhiteSpace'].get(),
+                                       separator=self['SettingEntryMultiLetterSeparator'].get())
+                self.__mg_handler.group_codes(index=self['SettingEntryGroupIndex'].get())
+
+                self.add(AppLabel, text='Multi-Group', container='AppFrameGroupContainer', padx=(0, 20))
+                self.add(AppLabel, text='Data Groups', prow=True, column=1, container='AppFrameGroupContainer',
+                         padx=(0, 20))
+                self.add(AppLabel, text='In-Group Name', prow=True, column=2, container='AppFrameGroupContainer',
+                         padx=(0, 20))
+
+                for (mg_k, mg_v), c in zip(self.__mg_handler.multi_groups.items(),
+                                           supports.ColorPresets().get(len(self.__mg_handler.multi_groups),
+                                                                       self.tie['SelectionMenuColorPreset'].get())):
+                    c = supports.rgb_to_hex(c)
+                    self.add(AppLabel, text=mg_k, container='AppFrameGroupContainer', padx=(0, 20),
+                             fg=c, font='Arial 12 bold')
+                    for i, (dg, ign) in enumerate(mg_v.items()):
+                        prow = True if i == 0 else False
+                        self.add(AppLabel, text=dg, sid=f'{mg_k}:{dg}', column=1, container='AppFrameGroupContainer',
+                                 padx=(0, 20), prow=prow, fg=c, font='Arial 12 bold')
+                        self.add(AppLabel, text=ign, sid=f'{mg_k}:{dg}:IGN', column=2, container='AppFrameGroupContainer',
+                                 padx=(0, 20), prow=True, fg=c, font='Arial 12 bold')
+            except TypeError:
+                pass
+        self.__toggle_rename_table()
+        self.__toggle_bulk_edit_table()
+
+    def __save_multi_group_setup(self):
+        """Internal method that saves the multi-group setup to the multi-group json."""
+
+        json_path = r'{}\_misc\multi_group.json'.format(self.tie.dv_get('OutputFolder'))
+        mg_name = self['SettingEntryMultiGroupName'].get()
+        if mg_name == '':  # catch missing name
+            messagebox.showerror('Missing Name', 'Set a name for the multi-group setup before proceeding.',
+                                 parent=self.parent)
+        elif self.is_empty('AppFrameGroupContainer'):
+            messagebox.showerror('Missing Setup', 'Set up the multi-group before proceeding.',
+                                 parent=self.parent)
+        else:
+            # fetch existing multi-group entries
+            if os.path.exists(json_path):
+                mg_json = supports.json_dict_push(json_path, behavior='read')
+            else:
+                mg_json = {}
+
+            if mg_name in mg_json:
+                prompt = messagebox.askokcancel('Multi-group name already exists',
+                                                message=f'A multi-group already exists with name {mg_name!r} '
+                                                        f'Proceeding will overwrite it. Do you want to continue?',
+                                                parent=self.parent)
+                if prompt is not True:
+                    return
+
+            if self['AppCheckbuttonRenameMGs'].get() is True:
+                mgs = {self[e].get():v for v, e in zip(self.mg_dg_names.values(), self.tags['RenameMultiGroups'])}
+            else:
+                mgs = self.mg_dg_names
+
+            update_dict = {mg_name: {
+                'Delimiters': self['SettingEntryDelimiters'].get(),
+                'UseRegex': self['AppCheckbuttonUseRegex'].get(),
+                'RecWhiteSpace': self['AppCheckbuttonRecWhiteSpace'].get(),
+                'MultiLetterSeparator': self['SettingEntryMultiLetterSeparator'].get(),
+                'GroupIndex': self['SettingEntryGroupIndex'].get(),
+                'RenameMultiGroup': self['AppCheckbuttonRenameMGs'].get(),
+                'BulkEditSettings': {
+                    'Enabled': self['AppCheckbuttonBulkGroupEdit'].get(),
+                    'Delimiter': self['SettingEntryBGEDelimiter'].get(),
+                    'Target': self['SettingEntryBGETarget'].get(),
+                    'Replacement': self['SettingEntryBGEReplacement'].get(),
+                },
+                'MultiGroup': mgs
+            }}
+
+            base.directory_checker(r'{}\_misc'.format(self.tie.dv_get('OutputFolder')), clean=False)
+            supports.json_dict_push(json_path, params=update_dict, behavior='mutate')  # update presentation_masks.json
+
+            # at last update visible mask options
+            if mg_name not in mg_json:  # add option to available options if it does not already exist
+                self.tie['SelectionMenuMultiGroup'].add_option(mg_name, order=-1)
+            self.tie['SelectionMenuMultiGroup'].set(mg_name)  # set added option as selection
+
+            self.cancel_window()  # destroy sorting creator
+
+    def cancel_window(self):
+        """Update cancel window functionality to insert fallback setting."""
+        # define fallback functionality to prevent the 'Add ...' selection to ever be selected as the mask
+        current = self.tie['SelectionMenuMultiGroup'].get(); previous = self.tie['SelectionMenuMultiGroup'].previous
+        if current == 'Add ...':
+            if previous == 'Add ...':
+                self.tie['SelectionMenuMultiGroup'].set(self.tie['SelectionMenuMultiGroup'].default)
+            else:
+                self.tie['SelectionMenuMultiGroup'].set(previous)
+        super().cancel_window()
+
+
 class DataGroupEditor(WindowFrame):
     def __init__(self, parent, *args, **kwargs):
         kwargs['padx'] = 0; kwargs['pady'] = 0
@@ -1570,7 +1977,7 @@ class DataGroupEditor(WindowFrame):
         self.add(AppLabel, text='Edit Groups', prow=True, column=2, tooltip=True,
                  container='AppFrameGroupEditorTable')
 
-        for file in self.files:
+        for file in supports.sort(self.files):
             elem = self.add(TextCheckbutton, text=file, container='AppFrameGroupEditorTable', padx=(0, 15),
                             font='Arial 12')
             _ = self.add(GroupNameEntry, sid=f':{file}', prow=True, column=1, tag='GroupEntry',
@@ -1578,6 +1985,22 @@ class DataGroupEditor(WindowFrame):
             _.tether_action['selection'] = ''
             _.trace_add('write', self.__GroupEntry_trace); _.tether(elem, False, action=_.tether_action)
         self.load_edit_groups_column()
+
+        self.add(AppLabel, text='Multi-group setup:', sid='MultiGroup', tooltip=True, pady=(5, 5))
+        # set multi-group selection menu options
+        _mg_path = r'{}\_misc\multi_group.json'.format(self.dv_get('OutputFolder')); _ = ['None']
+        if os.path.exists(_mg_path):
+            _ += list(supports.json_dict_push(_mg_path, behavior='read'))
+        _ += ['Add ...']
+        self.add(SelectionMenu, options=_, sid='MultiGroup', prow=True, padx=(150, 0), pady=(5, 5), default=0, width=20,
+                 commands={'Add ...': self.__add_multi_group_setup})
+        self.__toggle_multi_group()
+
+    def __toggle_multi_group(self, *_):
+        if self.parent.sample_type in ('Single-Field', 'Zero-Field'):
+            self['AppLabelMultiGroup'].grid(); self['SelectionMenuMultiGroup'].grid()
+        else:
+            self['AppLabelMultiGroup'].grid_remove(); self['SelectionMenuMultiGroup'].grid_remove()
 
     def load(self):
         try:  # catch missing output folder
@@ -1656,6 +2079,12 @@ class DataGroupEditor(WindowFrame):
                 fg_c = supports.highlight(c, -65) if np.mean(_c) > .5 else supports.highlight(c, 130)
                 self[group]['bg'] = c; self[group]['fg'] = fg_c
 
+    def __add_multi_group_setup(self):
+        level = TopLevelWidget(self); level.title('Multi-Group Creator')
+        level.geometry(f'{int(self.winfo_screenwidth() * .5)}x{int(self.winfo_screenheight() * .5)}')
+        content = MultiGroupCreator(level.main.interior, name='MultiGroupCreator', tie=self)
+        content.pack(fill='both', expand=True)
+
     @supports.thread_daemon
     def __reset_group_editor(self):
         for f in self.files: self[f'GroupNameEntry:{f}'].set('')
@@ -1678,10 +2107,7 @@ class AnalysisOptions(WindowFrame):
     def __base__(self):
         # load sample set settings
         settings = supports.json_dict_push(r'{}\Settings.json'.format(self.dv_get('OutputFolder')), behavior='read')
-        self.process_mask = process_mask = settings['CollectionPreprocessSettings']['MaskSelection']
         self.sample_type = sample_type = settings['CollectionPreprocessSettings']['SampleType']
-        mask_settings = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\masks.json',
-                                                behavior='read')[sample_type][process_mask]
 
         self.add(AppTitle, text='Data Analysis')
         self.add(DataGroupEditor, sid='Section')
@@ -1692,13 +2118,16 @@ class AnalysisOptions(WindowFrame):
         self.add(AppFrame, sid='NucleiAnalysisSettings', padx=(22, 0), pady=(5, 20))
 
         if sample_type == 'Multi-Field':
+            self.process_mask = process_mask = settings['CollectionPreprocessSettings']['MaskSelection']
+            mask_settings = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\masks.json',
+                                                    behavior='read')[sample_type][process_mask]
+
             # fetch custom presentation masks if they exist
             self.add(AppLabel, text='Presentation mask:', tooltip=True, sid='PresentationMask', padx=(0, 10),
                      container='AppFrameNucleiAnalysisSettings')
             pmask_data = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\presentation_masks.json',
                                                  behavior='read')
-            _ = list(pmask_data[process_mask]) + ['Add ...'] if process_mask in pmask_data else [
-                'Add ...']  # fetch keys
+            _ = list(pmask_data[process_mask]) + ['Add ...'] if process_mask in pmask_data else ['Add ...']  # fetch keys
             if 'Native' not in _:
                 _ = ['Native'] + _  # add native option
             self.add(SelectionMenu, sid='PresentationMask', options=_, prow=True, column=1, width=17,
@@ -1711,6 +2140,9 @@ class AnalysisOptions(WindowFrame):
                          commands={'Add ...': self.__add_field_sorting}, container='AppFrameNucleiAnalysisSettings')
             _.tether(self['SelectionMenuPresentationMask'], 'Select Option', _.tether_action, mode='==')
             self['SelectionMenuPresentationMask'].trace_add('write', self.__update_sorting_options)
+
+            self.add(AppCheckbutton, text='Mean multiples', sid='MeanIndexMultiples', padx=(0, 10),
+                     container='AppFrameNucleiAnalysisSettings', tooltip=True, default=True)
         elif sample_type in ('Single-Field', 'Zero-Field'):
             self.add(AppLabel, text='External reference group:', sid='ExternalReferenceGroup', padx=(0, 10),
                      container='AppFrameNucleiAnalysisSettings', tooltip=True)
@@ -1725,10 +2157,10 @@ class AnalysisOptions(WindowFrame):
             self.add(SettingEntry, sid='BarWidth', prow=True, container='AppFrameNucleiAnalysisSettings', default=0.4,
                      vartype=float, column=1)
 
-            self.add(AppLabel, text='Seeding density (c/cm²):', sid='SeedingDensity', padx=(0, 10),
-                     container='AppFrameNucleiAnalysisSettings')
-            self.add(SettingEntry, sid='SeedingDensity', prow=True, container='AppFrameNucleiAnalysisSettings',
-                     vartype=int, column=1)
+            self.add(AppLabel, text='Seeding score criterion:', sid='SeedingScoreCriterion', padx=(0, 10),
+                     container='AppFrameNucleiAnalysisSettings', tooltip=True)
+            self.add(SettingEntry, sid='SeedingScoreCriterion', prow=True, container='AppFrameNucleiAnalysisSettings',
+                     default=0, vartype=float, column=1)
 
         self.add(AppLabel, text='Data label size:', sid='LabelSize', padx=(0, 10),
                  container='AppFrameNucleiAnalysisSettings')
@@ -1739,6 +2171,13 @@ class AnalysisOptions(WindowFrame):
                  container='AppFrameNucleiAnalysisSettings')
         self.add(SettingEntry, sid='LabelRotation', prow=True, container='AppFrameNucleiAnalysisSettings', default=70,
                  vartype=float, column=1)
+
+        self.add(AppCheckbutton, text='Morphology evaluation', sid='MorphologyAnalysis', default=False, tooltip=True,
+                 container='AppFrameNucleiAnalysisSettings')
+        self.add(AppCheckbutton, text='Seeding compensation', sid='SeedingCompensation', default=False, tooltip=True,
+                 container='AppFrameNucleiAnalysisSettings')
+        self.add(AppCheckbutton, text='Mark seeding count', sid='MarkIdealCellCount', default=False, tooltip=True,
+                 container='AppFrameNucleiAnalysisSettings')
 
         elem.trace_add('write', self.__set_up_ccp_settings)
 
@@ -1756,6 +2195,11 @@ class AnalysisOptions(WindowFrame):
         _ = self.add(SelectionMenu, options=('Normal', 'Log Normal', 'Skewed Normal'), sid='DistributionModel',
                      prow=True, column=1, default=1, container='AppFrameNearestNeighborEvaluationSettings')
 
+        self.add(AppLabel, text='Maximum largest bin reduction:', sid='ForceFit', padx=(0, 10),
+                 container='AppFrameNearestNeighborEvaluationSettings', tooltip=True)
+        _ = self.add(SettingEntry, width=7, sid='ForceFit', prow=True, column=1, default=0, vartype=int,
+                     container='AppFrameNearestNeighborEvaluationSettings')
+
         self.add(AppCheckbutton, text='Zero-lock distribution model', sid='ZeroLock', padx=(0, 10), tooltip=True,
                  container='AppFrameNearestNeighborEvaluationSettings', default=False)
         _.trace_add('write', self.__toggle_zero_lock_checkbutton); self.__toggle_zero_lock_checkbutton()
@@ -1764,9 +2208,6 @@ class AnalysisOptions(WindowFrame):
                  container='AppFrameNearestNeighborEvaluationSettings')
 
         elem.trace_add('write', self.__set_up_nne_settings)
-
-        # array heatmap options
-        # self.add(AppCheckbutton, text='Array Heatmap')
 
         if sample_type == 'Multi-Field':  # control fields setup
             self.add(AppSubtitle, text=f'Control Fields on {process_mask!r}', tooltip=True, sid='ControlFields')
@@ -1785,12 +2226,6 @@ class AnalysisOptions(WindowFrame):
                 supports.tprint(f'Mask {process_mask!r} has no defined control fields.')
 
         self.add(AppSubtitle, text='Miscellaneous Options')
-
-        # FEATURE TO BE ADJUSTED IN RELEASED VERSION
-        # self.add(AppLabel, text='Indicate structures: ')
-        # self.add(SelectionMenu, options=('Markers', '2D Graphics', '3D Graphics', 'None'),
-        #              sid='IndicateStructures', default=0, padx=(150, 0), prow=True, width=11)
-        # ------------------------------------------
 
         self.add(AppLabel, text='Graph style:')
         self.add(SelectionMenu, options=('Crisp', 'Crisp (No L-Frame)'), sid='GraphStyle', default=1,
@@ -1813,6 +2248,15 @@ class AnalysisOptions(WindowFrame):
         if sample_type in ('Single-Field', 'Zero-Field'):
             self['SettingEntryLabelRotation'].set(0)
             self['SettingEntryLabelSize'].set(10)
+
+        self.check_morphology_processing()  # check whether the morphology processing has been performed on widget load
+
+    def check_morphology_processing(self):
+        settings = supports.json_dict_push(r'{}\Settings.json'.format(self.dv_get('OutputFolder')), behavior='read')
+        if settings['CollectionProcessSettings']['MorphologyChannel'] is not None:
+            self['AppCheckbuttonMorphologyAnalysis'].set(True)  # change morph eval default if processed for it
+        else:
+            self['AppCheckbuttonMorphologyAnalysis'].grid_remove()
 
     def update_erg_selection_menu(self, *_):
         groups = list(self['DataGroupEditorSection'].groups.get().keys())
@@ -1875,17 +2319,16 @@ class AnalysisOptions(WindowFrame):
                                     params=update_dict)
 
     def __add_mask(self):
-        level = TopLevelWidget(self)
-        # level.geometry('800x400')
-        level.title('Presentation Mask Creator')
-        _main = PresentationMaskCreator(level, name='PresentationMaskCreator', tie=self)
-        _main.pack(fill='both', expand=True)
+        level = TopLevelWidget(self); level.title('Presentation Mask Creator')
+        level.geometry(f'{int(self.winfo_screenwidth() * .5)}x{int(self.winfo_screenheight() * .5)}')
+        content = PresentationMaskCreator(level.main.interior, name='PresentationMaskCreator', tie=self)
+        content.pack(fill='both', expand=True)
 
     def __add_field_sorting(self):
-        level = TopLevelWidget(self)
-        level.title('Field Sorting Creator')
-        _main = FieldSortingCreator(level, name='FieldSortingCreator', tie=self)
-        _main.pack(fill='both', expand=True)
+        level = TopLevelWidget(self); level.title('Field Sorting Creator')
+        level.geometry(f'{int(self.winfo_screenwidth() * .5)}x{int(self.winfo_screenheight() * .5)}')
+        content = FieldSortingCreator(level.main.interior, name='FieldSortingCreator', tie=self)
+        content.pack(fill='both', expand=True)
 
     def __toggle_zero_lock_checkbutton(self, *_):
         if self['SelectionMenuDistributionModel'].get() == 'Log Normal':
@@ -1896,7 +2339,6 @@ class AnalysisOptions(WindowFrame):
     def __save_control_fields(self):
         """Internal method that saves control fields under the selected mask."""
         _existing = supports.json_dict_push(rf'{supports.__cache__}\mask_control_fields.json', behavior='read')
-        # if self.dv_check('ImageMask') is True and self.dv_get('ImageMask') != 'Select Option':
         out_dir = self.dv_get('OutputFolder')
         settings = supports.json_dict_push(rf'{out_dir}\Settings.json', behavior='read')
         _mask = settings['CollectionPreprocessSettings']['MaskSelection']
@@ -1912,24 +2354,16 @@ class AnalysisOptions(WindowFrame):
     def __analyze(self):
         """Internal method that extract the cell counting settings."""
 
-        # reset the previous 'Process' state
-
-        """Note that larger changes will have to be done for the processing of single structure data, since these 
-        will rely on external rather than internal controls"""
-
         json_path = r'{}\Settings.json'.format(self.dv_get('OutputFolder'))  # set file path
-        saved_settings = supports.json_dict_push(json_path, behavior='read')  # DEV TEST
         settings = {'CollectionAnalysisSettings': {
             'ColorPreset': self['DataGroupEditorSection']['SelectionMenuColorPreset'].get(),
             'DataGroups': list(self['DataGroupEditorSection'].groups.get().keys()),
             'AnalyzeData': {
                 'NucleiAnalysis': self['AppCheckbuttonNucleiAnalysis'].get(),
                 'NearestNeighbourHistogram': self['AppCheckbuttonNearestNeighborEvaluation'].get(),
-                # 'ArrayHeatmap': self['AppCheckbuttonArrayHeatmap'].get()
             },
             'ExcelExport': self['AppCheckbuttonExcelExport'].get(),
             'FigureFont': self['SettingEntryFigureFont'].get(),
-            # 'IndicateStructures': self['SelectionMenuIndicateStructures'].get(),
             'LabelSize': self['SettingEntryLabelSize'].get(),
             'LabelRotation': self['SettingEntryLabelRotation'].get(),
             'GraphStyle': self['SelectionMenuGraphStyle'].get(),
@@ -1938,22 +2372,33 @@ class AnalysisOptions(WindowFrame):
             'ZeroLock': self['AppCheckbuttonZeroLock'].get(),
             'DistributionModel': self['SelectionMenuDistributionModel'].get(),
             'FigureDpi': self['SettingEntryFigureDpi'].get(),
-            'ApplyDataGroupsToNNE': self['AppCheckbuttonApplyDataGroupsToNNE'].get()
+            'ApplyDataGroupsToNNE': self['AppCheckbuttonApplyDataGroupsToNNE'].get(),
+            'ForceFit': self['SettingEntryForceFit'].get(),
+            'MorphologyAnalysis': self['AppCheckbuttonMorphologyAnalysis'].get(),
+            'SeedingCompensation': self['AppCheckbuttonSeedingCompensation'].get(),
+            'MarkIdealCellCount': self['AppCheckbuttonMarkIdealCellCount'].get(),
         }, 'IndividualAnalysisSettings': {}}
 
         # add sample-type specific settings
         if self.sample_type == 'Multi-Field':
+            if self['SelectionMenuFieldSorting'].get() == 'Select Option':
+                messagebox.showerror('Missing Field Sorting', "Please select a Field Sorting from the "
+                                                              "drop-down menu to continue.", parent=self.parent)
+                return
+
             _ = {
                 'ControlFields': self['SelectionGridMask'].get(),
                 'FieldSorting': self['SelectionMenuFieldSorting'].get(),
                 'PresentationMask': self['SelectionMenuPresentationMask'].get(),
+                'MeanIndexMultiples': self['AppCheckbuttonMeanIndexMultiples'].get(),
             }
         elif self.sample_type in ('Single-Field', 'Zero-Field'):
             _ = {
                 'ExternalReferenceGroup': self['SelectionMenuExternalReferenceGroup'].get(),
                 'HideExternalReference': self['AppCheckbuttonHideExternalReference'].get(),
                 'BarWidth': self['SettingEntryBarWidth'].get(),
-                'SeedingDensity': self['SettingEntrySeedingDensity'].get()
+                'MultiGroup': self['DataGroupEditorSection']['SelectionMenuMultiGroup'].get(),
+                'SeedingScoreCriterion': self['SettingEntrySeedingScoreCriterion'].get()
             }
         settings['CollectionAnalysisSettings']['SampleTypeSettings'] = _
 
@@ -2004,7 +2449,6 @@ class ApplicationSettings(WindowFrame):
         self.add(AppFrame, sid='Column2', prow=True, column=2, padx=(50, 0))
 
         # column 0 setup
-
         self.add(AppSubtitle, text='Performance', container='AppFrameColumn0')
         self.add(AppLabel, text='Maximum CPU usage:', sid='MaxRelativeCPU', container='AppFrameColumn0', tooltip=True)
         self.add(SettingEntry, sid='MaxRelativeCPU', prow=True, padx=(180, 0), vartype=float,
@@ -2019,9 +2463,19 @@ class ApplicationSettings(WindowFrame):
         self.add(SettingEntry, sid='AuditImageResolution', prow=True, padx=(180, 0), vartype=int,
                  default=defaults['AuditImageResolution'], container='AppFrameColumn0')
 
+        self.add(AppLabel, text='File poll frequency (ms):', sid='FilePollingFrequency', container='AppFrameColumn0',
+                 tooltip=True)
+        self.add(SettingEntry, sid=f'FilePollingFrequency', prow=True, padx=(180, 0), vartype=int,
+                 container='AppFrameColumn0', default=defaults['FilePollingFrequency'])
+
+        self.add(AppLabel, text='File poll time-out (s):', sid='FilePollingTimeOut', container='AppFrameColumn0',
+                 tooltip=True)
+        self.add(SettingEntry, sid=f'FilePollingTimeOut', prow=True, padx=(180, 0), vartype=int,
+                 container='AppFrameColumn0', default=defaults['FilePollingTimeOut'])
+
         self.add(AppSubtitle, text='Interface', container='AppFrameColumn0')
-        self.add(AppLabel, text='Tooltip timer:', sid='TooltipTimer', container='AppFrameColumn0', tooltip=True)
-        self.add(SettingEntry, sid='TooltipTimer', prow=True, padx=(100, 0), vartype=int,
+        self.add(AppLabel, text='Tooltip timer (ms):', sid='TooltipTimer', container='AppFrameColumn0', tooltip=True)
+        self.add(SettingEntry, sid='TooltipTimer', prow=True, padx=(140, 0), vartype=int,
                  default=defaults['TooltipTimer'], container='AppFrameColumn0')
 
         # column 1 setup
@@ -2042,19 +2496,45 @@ class ApplicationSettings(WindowFrame):
         self.add(AppLabel, text='Presentation mask:', sid='PresentationMask', container='AppFrameColumn1')
         elem = self.add(SelectionMenu, sid='PresentationMask', prow=True, container='AppFrameColumn1', padx=(150, 0),
                         options=(), width=20)
-        elem.tether(_, 'Select Option', _.tether_action)
+        elem.tether(_, 'Select Option', elem.tether_action)
         _.trace_add('write', self._load_presentation_masks)
         self.add(TextButton, text='Delete Presentation Mask', command=self._delete_presentation_mask,
                  container='AppFrameColumn1', warning=True)
 
+        self.add(AppHeading, text='Field Sorting', container='AppFrameColumn1')
+        self.add(AppLabel, text='Field sorting:', sid='FieldSorting', container='AppFrameColumn1')
+        _ = self.add(SelectionMenu, sid='FieldSorting', prow=True, container='AppFrameColumn1', padx=(110, 0),
+                        options=(), width=20)
+        _.tether(elem, 'Select Option', _.tether_action)
+        elem.trace_add('write', self._load_field_sortings)
+        self.add(TextButton, text='Delete Field Sorting', command=self._delete_field_sorting,
+                 container='AppFrameColumn1', warning=True)
+
         # column 2 setup
         self.add(AppSubtitle, text='Debugging', container='AppFrameColumn2')
+        self.add(TextButton, text='Reset Cache', sid='ResetCache', container='AppFrameColumn2',
+                 command=self.reset_application_cache, warning=True)
         self.add(AppCheckbutton, text='Toggle debugger', sid='Debugger', container='AppFrameColumn2',
                  selection=self.dv('Debugger'), tooltip=True)
 
         self.add(AppButton, text='SAVE', command=self.save_settings)
+        self.add(TextButton, text='Restart Application', command=self.restart_application, sid='RestartApplication')
         _ = self.add(AppLabel, text='Application restart required'.upper(), sid='RestartApp', font='Arial 6 bold')
         _.grid_remove()
+
+    def restart_application(self):
+        self.winfo_toplevel().destroy()
+        root = CellexumApplication()
+        root.mainloop()
+
+    def reset_application_cache(self):
+        for file in ('application', 'directory_memory', 'mask_control_fields', 'saves', 'settings'):
+            try:
+                os.remove(rf'{supports.__cache__}\{file}.json')
+            except FileNotFoundError:
+                pass
+        supports.tprint(f'Cache was cleared successfully. Application is restarting.')
+        self.after(1500, self.restart_application)
 
     def save_settings(self):
         _ = {'ApplicationSettings': {
@@ -2063,12 +2543,26 @@ class ApplicationSettings(WindowFrame):
             'AuditImageResolution': self['SettingEntryAuditImageResolution'].get(),
             'TooltipTimer': self['SettingEntryTooltipTimer'].get(),
             'Debugger': self['AppCheckbuttonDebugger'].get(),
+            'FilePollingFrequency': self['SettingEntryFilePollingFrequency'].get(),
+            'FilePollingTimeOut': self['SettingEntryFilePollingTimeOut'].get(),
         }}
 
         supports.json_dict_push(rf'{supports.__cache__}\application.json', params=_, behavior='update')
 
-        if self['SettingEntryTooltipTimer'].get() != self.defaults['TooltipTimer']:
-            self['AppLabelRestartApp'].grid()
+        if (self['SettingEntryTooltipTimer'].get() != self.defaults['TooltipTimer'] or
+            self['SettingEntryFilePollingFrequency'].get() != self.defaults['FilePollingFrequency'] or
+            self['SettingEntryFilePollingTimeOut'].get() != self.defaults['FilePollingTimeOut']):
+            self._show_restart_text('required')
+        if self['AppCheckbuttonDebugger'].get() != self.defaults['Debugger']:
+            self._show_restart_text('optional')
+
+    def _show_restart_text(self, t='required'):
+        """Internal method that sets the state of the 'restart application' text."""
+        if t == 'required':
+            self['AppLabelRestartApp']['text'] = 'Application restart required'.upper()
+        elif t == 'optional':
+            self['AppLabelRestartApp']['text'] = 'Application restart recommended'.upper()
+        self['AppLabelRestartApp'].grid()
 
     def restore_defaults(self):
         defaults = supports.json_dict_push(rf'{supports.__cwd__}\defaults.json',
@@ -2106,6 +2600,25 @@ class ApplicationSettings(WindowFrame):
                     self['SelectionMenuPresentationMask'].update_options(())
             except IOError:
                 supports.tprint(r'There exists no presentation masks yet.')
+
+    def _load_field_sortings(self, *_):
+        if self['SelectionMenuPresentationMask'].get() != 'Select Option':
+            try:
+                field_sortings_json = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\field_sortings.json',
+                                                              behavior='read')
+                try:
+                    field_mask_sortings = field_sortings_json[self['SelectionMenuFieldMask'].get()]
+                    try:
+                        presentation_mask_sortings = field_mask_sortings[self['SelectionMenuPresentationMask'].get()]
+                        self['SelectionMenuFieldSorting'].update_options(list(presentation_mask_sortings))
+                    except KeyError:
+                        supports.tprint(r'There exists no associated field sortings for presentation mask {!r}.'.format(
+                            self['SelectionMenuPresentationMask'].get()))
+                except KeyError:
+                    supports.tprint(r'There exists no associated field sorting for field mask {!r}.'.format(
+                        self['SelectionMenuFieldMask'].get()))
+            except IOError:
+                supports.tprint(r'There exists no field sortings yet.')
 
     def _delete_field_mask(self):
         try:
@@ -2177,6 +2690,20 @@ class ApplicationSettings(WindowFrame):
             supports.tprint(r'Field mask {!r} for sample type {!r} does not exist'.format(
                 self['SelectionMenuFieldMask'].get(), self['SelectionMenuSampleTypeFieldMask'].get()))
 
+    def _delete_field_sorting(self):
+        try:
+            field_sorting_json = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\field_sortings.json',
+                                                         behavior='read')
+            field_sorting_json[self['SelectionMenuFieldMask'].get()][self['SelectionMenuPresentationMask'].get()].pop(
+                self['SelectionMenuFieldSorting'].get())
+            supports.json_dict_push(rf'{supports.__cwd__}\__misc__\field_sortings.json', params=field_sorting_json,
+                                    behavior='replace')
+            self._load_field_sortings()
+            self['AppLabelRestartApp'].grid()
+        except KeyError:
+            supports.tprint(r'Field sorting {!r} for presentation mask {!r} does not exist'.format(
+                self['SelectionMenuFieldSorting'].get(), self['SelectionMenuPresentationMask'].get()))
+
 
 class CellexumApplication(tk.Tk, TopLevelProperties):
     """Wrapper for the Cellexum application."""
@@ -2186,7 +2713,7 @@ class CellexumApplication(tk.Tk, TopLevelProperties):
         TopLevelProperties.__init__(self, dep_var={  # construct global variable dict
             'LastClick': tk.StringVar(self, ''),
             'AvailableChannels': JSONVar(self, value=[]),
-            'CurrentlyPreprocessingFile': tk.StringVar(self, ''),
+            'LatestPreprocessedFile': tk.StringVar(self, ''),
             'ActiveFrame': tk.StringVar(self, ''),
             'Debugger': tk.BooleanVar(self, False)
         })
@@ -2208,7 +2735,10 @@ class CellexumApplication(tk.Tk, TopLevelProperties):
 
         self.title('Cellexum')
         self.resizable(True, True)
-        self.geometry(f'{int(self.winfo_screenwidth() * .75)}x{int(self.winfo_screenheight() * .75)}')
+
+        app_height = int(self.winfo_screenheight() * .75)
+        app_width = 1150 if self.winfo_screenwidth() * .75 <= 1150 else int(self.winfo_screenwidth() * .75)
+        self.geometry(f'{app_width}x{app_height}')
         self.configure(background=supports.__cp__['bg'])
 
         # menu frame
@@ -2242,8 +2772,6 @@ class CellexumApplication(tk.Tk, TopLevelProperties):
         _.pack(side='bottom', pady=5, anchor='w', padx=(18, 0))
 
         self.bind('<Configure>', self._update_content_frame)
-        self.content_frame.interior.bind('<Configure>', self._update_content_frame)
-
         self.dependent_variables['ActiveFrame'].set('FileSelection')  # set current frame to the start frame
 
     def _update_content_frame(self, e):

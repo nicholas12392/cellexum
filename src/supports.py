@@ -5,6 +5,8 @@ import collections
 import numpy as np
 import time
 import cv2
+from ctypes import wintypes, windll
+import functools
 
 
 # ATTRIBUTES
@@ -28,6 +30,20 @@ with open(rf'{__cwd__}\__misc__\tooltips.json', 'r') as f:
 
 with open(rf'{__cwd__}\__misc__\warnings.json', 'r') as f:
     __warnings__ = json.load(f)  # load-in warnings
+
+# load in application settings
+_stop = False
+while not _stop:
+    try:
+        with open(rf'{__cache__}\application.json', 'r') as f:
+            __defaults__ = json.load(f)['ApplicationSettings']
+        _stop = True
+    except PermissionError:
+        time.sleep(10e-3)
+    except FileNotFoundError:
+        with open(rf'{__cwd__}\defaults.json', 'r') as f:
+            __defaults__ = json.load(f)['ApplicationSettings']
+        _stop = True
 
 # CLASSES
 class NumpyArrayEncoder(json.JSONEncoder):
@@ -102,6 +118,30 @@ def post_cache(params: dict, behavior='update'):
 
 
 def json_dict_push(path, params=None, behavior='update'):
+    """Poll wrapper for the _json_dict_push function. If the requested file action returns a PermissionError, the script
+    will wait poll_timer ms and try polling again until poll_time_out seconds have passed."""
+
+    start = time.time()
+    while True:
+        _runtime = time.time() - start
+        try:
+            _ = _json_dict_push(path, params=params, behavior=behavior)
+            return _
+        except PermissionError:
+            time.sleep(__defaults__['FilePollingFrequency'] / 1000)
+        except json.decoder.JSONDecodeError as e:
+            if _runtime < __defaults__['FilePollingTimeOut']:
+                if __defaults__['Debugger'] is True:
+                    tprint('JSON decoder failed at %s. Retrying in %s ms' % (path, __defaults__['FilePollingFrequency']))
+                time.sleep(__defaults__['FilePollingFrequency'] / 1000)
+            else:
+                raise RuntimeError(f'JSON decoder failed with {e!r} at {path!r}')
+
+        if _runtime > __defaults__['FilePollingTimeOut']:  # stop if polling has lasted too long
+            raise RuntimeError('Polling request for %s timed out.' % path)
+
+
+def _json_dict_push(path, params=None, behavior='update'):
     """
     Push json file to disk and overwrite existing variables with new values.
     :param path: Path to json file to be pushed.
@@ -312,11 +352,12 @@ class ColorPresets:
         return (lin_values + trig_values - func_min + min_shift) / (func_max - func_min + min_shift)
 
 
-def colorize(img, hex):
+def colorize(img, hex, cvt='black'):
     """
-    Converts a black rgba image to have color.
+    Converts a black/white rgba image to have color.
     :param img: rgba image from OpenCV
     :param hex: hex-code color for the image
+    :param cvt: color conversion for either 'black' or 'white' pixels. Default is 'black'.
     :return: Colored image
     """
 
@@ -325,7 +366,12 @@ def colorize(img, hex):
 
     handled_channels = []
     for channel, color in zip((b, g, r), np.flip(relative_rgb)):
-        c = channel - 255 * -1  # construct inversion matrix
+        if cvt == 'black':
+            c = channel - 255 * -1  # construct inversion matrix
+        elif cvt == 'white':
+            c = channel
+        else:
+            raise ValueError(f'cvt must be black or white, not {cvt!r}.')
         handled_channels.append(np.uint8(c * color))  # color inversion matrix
     _ = cv2.merge(handled_channels + [a])  # create new image matrix
 
@@ -353,3 +399,36 @@ def convert(value: str, t: type, debug: bool=False) -> str | int | float | None:
             tprint('Failed to convert {} to {}'.format(value, t))
         else:
             return value
+
+def sort(l):
+    """Sort a list composed of strings that contain both letters and values."""
+    # https://stackoverflow.com/questions/4813061/non-alphanumeric-list-order-from-os-listdir
+    _ = windll.Shlwapi.StrCmpLogicalW
+    _.argtypes = [wintypes.LPWSTR, wintypes.LPWSTR]
+    _.restype = wintypes.INT
+    return sorted(l, key=functools.cmp_to_key(_))
+
+
+def linestyles(n):
+    """Function that generates line styles for matplotlib plots. The first line will always be solid. Following, the
+    cycle will be dashed, dotted, dash dotted, and dash dot dotted. If there are more than 5 styles being generated
+    the cycle will restart with a multiplier that slightly changes the style for the next 4 generated line styles."""
+
+    styles = []; stype = 0; multiplier = 1
+    for _ in range(n):
+        if _ == 0:  # first line is always solid
+            styles.append((0, ()))
+        elif stype == 1:  # second style is dashed
+            styles.append((0, (5 * multiplier, 2 * multiplier)))
+        elif stype == 2:  # third style is dotted
+            styles.append((0, (1, 2 * multiplier)))
+        elif stype == 3:  # fourth style is dash dotted
+            styles.append((0, (3 * multiplier, 2 * multiplier, 1, 2 * multiplier)))
+        elif stype == 4:  # fifth style is dash dot dotted
+            styles.append((0, (3 * multiplier, 2 * multiplier, 1, 5 * multiplier, 1, 2 * multiplier)))
+
+        stype += 1
+        if stype > 4:
+            stype = 1; multiplier += 1
+    return styles
+

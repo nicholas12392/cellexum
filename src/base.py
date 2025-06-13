@@ -1,7 +1,5 @@
 import os
-import time
 import cv2
-import tqdm
 import numpy as np
 import pandas as pd
 import analysis
@@ -13,14 +11,12 @@ import bioformats
 import javabridge
 from bioformats import logback
 from bioformats.omexml import qn
-import multiprocessing
 import supports
-import matplotlib.pyplot as plt
 import concurrent.futures
 from PIL import Image, ImageDraw, ImageFont
+import warnings
 
-
-
+warnings.filterwarnings('ignore', category=sp.optimize.OptimizeWarning)
 
 
 class SampleParameters:
@@ -177,7 +173,6 @@ class RawImageHandler:
                         RawImageHandler.store_channel(metadata, reader, n, channel, file_out)
         javabridge.kill_vm()
         return metadata
-        # _out.send(metadata)
 
     @staticmethod
     def store_channel(metadata, reader, c_id, c_name, file_out):
@@ -197,7 +192,6 @@ class RawImageHandler:
     @staticmethod
     def store_metadata(file_path):
         """Method that collects the useful metadata from the .vsi file."""
-        # file_path = r'{}\{}.vsi'.format(self.dirs['InputFolder'], file)
         meta = bioformats.get_omexml_metadata(file_path)
         metadata = bioformats.omexml.OMEXML(meta)
         omen = OMENavigator(metadata)
@@ -267,8 +261,6 @@ class OMENavigator:
 
 class PreprocessingHandler:
     def __init__(self):
-        # grab files to preprocess from cache and immediately reset the entry
-        # self.__files = supports.setting_cache('FilesToPreprocess', clear_entry=True)
 
         self.mask_dict = {}
 
@@ -289,13 +281,14 @@ class PreprocessingHandler:
         self.pbar = None
         self.sbar = None
 
-    def preprocess(self, file):
+    def preprocess(self, file) -> dict:
         self.channels = LoadImage(r'{}\{}.vsi'.format(self.dirs['InputFolder'], file))
 
+        wpars = {}
         if self._pps['SampleType'] != 'Zero-Field':
             mask_constructor = MaskConstruction(self.channels); rotated_index_mask = None
             if self._pps['SampleType'] == 'Multi-Field':
-                index_mask = mask_constructor.multi_field_identification(0, 15)
+                index_mask, wpars = mask_constructor.multi_field_identification()
                 analyser = analysis.ImageAnalysis()
                 optimal_rotation = analyser.compare_matrix(index_mask, self.channels)
                 rotated_index_mask, rotated_channels = analyser.rotate_matrix(self.channels, index_mask)
@@ -319,18 +312,18 @@ class PreprocessingHandler:
                         }
                     })
             elif self._pps['SampleType'] == 'Single-Field':
-                index_mask = mask_constructor.single_field_identification(0, 15)
+                index_mask, wpars = mask_constructor.single_field_identification()
                 rotated_index_mask = index_mask
 
             self.create_mask_image(rotated_index_mask, self.channels,
                                    mask_constructor.draw_parameters['PreprocessedParameters'][file])
             self.cut_mask(rotated_index_mask, self.channels)
         else:
-            self.handle_zero_field(self.channels)
+            wpars = self.handle_zero_field(self.channels)
 
-        return file
+        return wpars  # return write parameters for the main loop Settings.json
 
-    def handle_zero_field(self, channels):
+    def handle_zero_field(self, channels) -> dict:
         """Method handles image preprocessing of zero-field sample types.
         :param channels: the channels contained in the mask from the LoadImage class."""
 
@@ -365,6 +358,12 @@ class PreprocessingHandler:
         supports.json_dict_push(r'{}\{}\maskdata.json'.format(self.dirs['OutputFolder'], channels.metadata['FileName']),
                                 params=_, behavior='replace')
 
+        _ = {'PreprocessedParameters': {channels.metadata['FileName']: {'FieldParameters': {
+            'ScaleBar': channels.metadata['ImageData']['ScaleBarRMS'] ** -1
+        }}}}
+
+        return _
+
     def cut_mask(self, rotated_index_mask: dict | list, channels):
         """Method that cuts a masked image according to the mask.
         :param rotated_index_mask: the rotated index mask. Note if SampleType == Single-Field, this is instead the
@@ -387,13 +386,19 @@ class PreprocessingHandler:
                          'The mask is likely misaligned. Try adjusting \'MinFields\' or shift the mask and retry.')
 
         # cut images according to mask and write the cuts out
-        sbar = tqdm.tqdm(total=len(rotated_index_mask), leave=False)
         _ = {'SampleName': channels.metadata['FileName'],
              'ContourMask': {}}  # placeholder dict for maskdata.json
         for cid, c in rotated_index_mask.items():
             _id = str(self.mask_dict[cid])
-            sbar.set_description(f' >>>   {_id}')
             x, y, w, h = cv2.boundingRect(c)
+
+            if x < 0:
+                x = 0
+                supports.tprint('The mask top left corner is negative. The x-coordinate has been corrected to 0.')
+            if y < 0:
+                y = 0
+                supports.tprint('The mask top left corner is negative. The y-coordinate has been corrected to 0.')
+
             (cX, cY), (mW, mH), a = cv2.minAreaRect(c)
 
             _['ContourMask'][_id] = {
@@ -413,18 +418,14 @@ class PreprocessingHandler:
                     cv2.imwrite(layer_path, layer_cut)
                 except cv2.error:
                     raise IndexError(exception)
-            sbar.update(1)
         supports.json_dict_push(r'{}\{}\maskdata.json'.format(self.dirs['OutputFolder'], channels.metadata['FileName']),
                                 params=_, behavior='replace')
-        sbar.close()
-        sbar.refresh()
 
     def create_mask_image(self, index_mask, channels, parameters):
         """Method that creates a mask image."""
         img = cv2.cvtColor(channels['MaskChannel'], cv2.COLOR_GRAY2BGR)
         img_h, img_w = img.shape[:2]  # shape yields (rows, columns, z) -> (y, x, z) or (h, w, z)
         font_scale = 3 / 8700 * img_w
-        # img_center = (img_w // 2, img_h // 2)
         w, h = parameters['FieldParameters']['Width'], parameters['FieldParameters']['Height']
 
         # add sample-specific items to image
@@ -466,7 +467,10 @@ class PreprocessingHandler:
         out_path = r'{}\_masks for manual control'.format(self.dirs['OutputFolder'])
         lr_path = r'{}\{}.png'.format(out_path, channels.metadata['FileName'])
         if not os.path.exists(out_path):
-            os.makedirs(out_path)
+            try:  # if more subprocesses finish simultaneously, this path creation can overlap, raising an error
+                os.makedirs(out_path)
+            except FileExistsError:
+                pass
         scaled_img = criterion_resize(img)
         scaled_img = cv2.convertScaleAbs(scaled_img, alpha=2, beta=20)  # contrast enhance and brighten ctrl image
         cv2.imwrite(lr_path, scaled_img)
@@ -484,6 +488,7 @@ class MaskConstruction:
         self.mask_pars = PixelParameters(self.metadata['ImageData']['ScaleBarRMS'])
         self.blur_image = cv2.medianBlur(channels['MaskChannel'], 5)
         self.found_fields = []
+        self.TP = None
 
         # fetch settings
         self.dirs = supports.setting_cache()['DirectorySettings']
@@ -496,6 +501,7 @@ class MaskConstruction:
         :param pre: the permitted maximum ratio error"""
         cnt = []
         for c in contours:
+            c = cv2.convexHull(c)
             (x, y), (w, h), a = cv2.minAreaRect(c)
             if h > 0:
                 c_area = w * h
@@ -511,34 +517,57 @@ class MaskConstruction:
         return cnt
 
     def __contour_detect(self, onset, span):
-        thresh_img = cv2.threshold(self.blur_image, onset, onset + span, cv2.THRESH_BINARY_INV)[1]  # convert to binary
+        _binary = onset - span
+        if _binary < 0:
+            _binary = 0
+
+        thresh_img = cv2.threshold(self.blur_image, onset, 255, cv2.THRESH_TOZERO_INV)[1]  # convert to binary
+        thresh_img = cv2.threshold(thresh_img, _binary, 255, cv2.THRESH_BINARY)[1]  # convert to binary
         morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))  # define morphology kernel
         morph_img = cv2.morphologyEx(thresh_img, cv2.MORPH_CLOSE, morph_kernel,
                                      iterations=2)  # apply morphology to threshold
+
         cont = cv2.findContours(morph_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[0]  # find contours
 
-        col_ratio = np.mean(morph_img) / (onset + span)  # determine binary coverage with the current threshold
+        col_ratio = np.mean(morph_img) / 255  # determine binary coverage with the current threshold
 
         return cont, col_ratio
 
-    def multi_field_identification(self, onset_intensity, intensity_span, **kwargs):
+    @staticmethod
+    def _attempt_fit(data) -> list | None:
+        """Attempts to fit data to a linear regression. If TypeError occurs, the popt defaults to None. Otherwise popt
+        is returned."""
+        try:
+            popt, _ = sp.optimize.curve_fit(linear_regression, *list(zip(*data)))
+        except TypeError:
+            popt = None
+        return popt
+
+    def multi_field_identification(self, **kwargs):
         # find intensity spans between 10-70% white field ratio with at least settings[MinFields] number of fields
 
         pars = {
-            'return_settings': False
+            'return_settings': False,
+            'orc': False
         }
 
         for k, v in pars.items():
             if k not in kwargs:
                 kwargs[k] = v
 
-        mask_settings = self.__settings['IndividualPreprocessSettings'][self.metadata['FileName']]
+        if kwargs['orc'] is True:
+            mask_settings = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\masks.json', behavior='read')[
+                self.__settings['CollectionPreprocessSettings']['SampleType']][
+                self.__settings['CollectionPreprocessSettings']['MaskSelection']]['OrientationReference']
+        else:
+            mask_settings = self.__settings['IndividualPreprocessSettings'][self.metadata['FileName']]
         min_fields = int(mask_settings['MinFields'])
 
-        white_field_ratio = 0
-        contour_sets = []
-        contour_grid = []
-        while white_field_ratio <= .7:  # iterate intensity thresholds until 70% of the image is white
+        max_len = 0; intensity_span = mask_settings['OnsetIntensitySpan']; onset_intensity = 0
+        trimmed_onset_intensity_span = intensity_span
+        contour_sets = []; contour_grid = []
+        stop = False
+        while stop is False:  # iterate intensity thresholds until 70% of the image is white
             cont, white_field_ratio = self.__contour_detect(onset_intensity, intensity_span)  # detect contours
             contours = self.__contour_filter(cont)  # find a rough estimate of the fields in the image
 
@@ -566,6 +595,10 @@ class MaskConstruction:
                         _.append((c, a))
 
                 if len(_) >= min_fields:
+                    if max_len == 0:  # determine the intensity span for which structures are starting to be found
+                        trimmed_onset_intensity_span = intensity_span
+                    max_len = len(_) if len(_) > max_len else max_len  # track the largest contour set
+
                     # collect errors and dimensions for contour sets from the best [min_fields]
                     widths, heights, angles, centres = [], [], [], []
                     for c, a in _:
@@ -579,12 +612,33 @@ class MaskConstruction:
                     mean_angle = np.mean(angles[:min_fields])
                     contour_sets.append(([len(contours), centres],
                                          [np.mean(widths[:min_fields]), np.mean(heights[:min_fields]), mean_angle]))
-            onset_intensity += 1
+
+            # quit the loop early if the white ratio gets too high and 'enough' fields are found or intensity is maxed
+            if white_field_ratio >= .7 and max_len > min_fields:
+                stop = True
+            elif onset_intensity > 254:
+                if max_len > min_fields:
+                    stop = True
+                else:
+                    onset_intensity = 0
+                    intensity_span += mask_settings['IterativeFidelity']
+                    supports.tprint('Thresholding has restarted with intensity span %d for file %s.'
+                                    % (intensity_span, self.metadata['FileName']))
+            elif intensity_span > 100:
+                raise RuntimeError(
+                    'Threshold intensity span exceeded for %s. Try lowering the Fields or Fidelity option.'
+                                   % self.metadata['FileName'])
+            else:
+                onset_intensity += mask_settings['IterativeFidelity']
 
         # define field dimensions along with all unique contours
         contour_grid = sorted(contour_grid, key=operator.itemgetter(-1))
         contour_sets = list(zip(*contour_sets))
-        (width, height, angle) = np.mean(contour_sets[1], axis=0)
+
+        try:
+            (width, height, angle) = np.mean(contour_sets[1], axis=0)
+        except IndexError:
+            raise RuntimeError('No contours found for %s. Try lowering the Fields option.' % self.metadata['FileName'])
 
         if mask_settings['Align']:
             angle = mask_settings['Align']
@@ -605,38 +659,57 @@ class MaskConstruction:
         contour_grid = list(zip(*_))
 
         # transform all contours to a vector space with an arbitrary origin
-        x0, y0 = contour_grid[1][0]
-        contour_vectors = []
-        contour_magnitudes = []
-        for (x, y) in contour_grid[1]:
-            contour_vectors.append((x - x0, y - y0))
-            contour_magnitudes.append(np.sqrt((x - x0) ** 2 + (y - y0) ** 2))
+        stop = False; i = 0
+        while stop is False:
+            try:
+                x0, y0 = contour_grid[1][i]
+            except IndexError:
+                raise RuntimeError(
+                    f'Not enough fields found to determine mask for %s. Try changing the Fields option value.'
+                    % self.metadata['FileName'])
 
-        # create functions to determine x-shift for row changes and y-shift for column changes, and x,y separations
-        ideal_x_sep = self.mask_pars['FieldSpacingX'] + width
-        ideal_y_sep = self.mask_pars['FieldSpacingY'] + height
-        column0_shifts, row0_shifts, column0_mags, row0_mags, x_sep, y_sep = [], [], [], [], [], []
-        for v, m in zip(contour_vectors, contour_magnitudes):
-            vxp, vxm = v[0] + m, v[0] - m
-            vyp, vym = v[1] + m, v[1] - m
-            if -2 < vxm < 2 or -2 < vxp < 2:
-                _id = int(np.round(v[0] / ideal_y_sep, 0))
-                row0_shifts.append((_id, v[1]))
-                y_sep.append((_id, v[0]))
-            if -2 < vym < 2 or -2 < vyp < 2:
-                _id = int(np.round(v[1] / ideal_x_sep, 0))
-                column0_shifts.append((_id, v[0]))
-                x_sep.append((_id, v[1]))
+            contour_vectors = []
+            contour_magnitudes = []
+            for (x, y) in contour_grid[1]:
+                contour_vectors.append((x - x0, y - y0))
+                contour_magnitudes.append(np.sqrt((x - x0) ** 2 + (y - y0) ** 2))
 
-        row_x_shift_popt, _ = sp.optimize.curve_fit(linear_regression, *list(zip(*column0_shifts)))
-        column_y_shift_popt, _ = sp.optimize.curve_fit(linear_regression, *list(zip(*row0_shifts)))
-        y_sep_popt, _ = sp.optimize.curve_fit(linear_regression, *list(zip(*y_sep)))
-        x_sep_popt, _ = sp.optimize.curve_fit(linear_regression, *list(zip(*x_sep)))
+            # create functions to determine x-shift for row changes and y-shift for column changes, and x,y separations
+            ideal_x_sep = self.mask_pars['FieldSpacingX'] + width
+            ideal_y_sep = self.mask_pars['FieldSpacingY'] + height
+            column0_shifts, row0_shifts, column0_mags, row0_mags, x_sep, y_sep = [], [], [], [], [], []
+            for v, m in zip(contour_vectors, contour_magnitudes):
+                vxp, vxm = v[0] + m, v[0] - m
+                vyp, vym = v[1] + m, v[1] - m
+                if -2 < vxm < 2 or -2 < vxp < 2:
+                    _id = int(np.round(v[0] / ideal_y_sep, 0))
+                    row0_shifts.append((_id, v[1]))
+                    y_sep.append((_id, v[0]))
+                if -2 < vym < 2 or -2 < vyp < 2:
+                    _id = int(np.round(v[1] / ideal_x_sep, 0))
+                    column0_shifts.append((_id, v[0]))
+                    x_sep.append((_id, v[1]))
 
-        def point_to_space(_r, _c):  # create transformer function
+            row_x_shift_popt = self._attempt_fit(column0_shifts)
+            column_y_shift_popt = self._attempt_fit(row0_shifts)
+            y_sep_popt = self._attempt_fit(y_sep)
+            x_sep_popt = self._attempt_fit(x_sep)
+
+            if any(i is None for i in (row_x_shift_popt, column_y_shift_popt, y_sep_popt, x_sep_popt)):
+                i += 1
+            elif i > len(contour_grid[1]):
+                raise RuntimeError(
+                    'Not enough contours found for %s. Try lowering the Fields option.' % self.metadata['FileName'])
+            else:
+                stop = True
+
+        def point_to_space(_r, _c, npa=False) -> np.ndarray | tuple:  # create transformer function
             vector_x = linear_regression(_c, *x_sep_popt) + linear_regression(_r, *row_x_shift_popt)
             vector_y = linear_regression(_r, *y_sep_popt) + linear_regression(_c, *column_y_shift_popt)
-            return vector_x, vector_y
+            if npa is True:  # return coordinates as a numpy array if prompted
+                return np.array([vector_x, vector_y])
+            else:
+                return vector_x, vector_y
 
         # transform all existing points to the point grid
         point_grid = {}
@@ -677,7 +750,6 @@ class MaskConstruction:
 
         # construct a grid in the image space according to the adjusted point grid limits
         index_mask = {}
-        mask_contours = []
         real_indices = []
         for r in range(min_r, max_r + 1, 1):
             for c in range(min_c, max_c + 1, 1):
@@ -688,17 +760,31 @@ class MaskConstruction:
                         real_indices.append((r - min_r, c - min_c))
                 index_mask[(r - min_r, c - min_c)] = np.int64(cv2.boxPoints((
                     (vector_x + x0, vector_y + y0), (width, height), angle)))  # save contours and reset origin to zero
-                mask_contours.append(np.int64(cv2.boxPoints((
-                    (vector_x + x0, vector_y + y0), (width, height), angle))))
+
+        if mask_settings['MaskShift'] == 'Auto':
+            _coords = np.vstack(list(index_mask.values()))  # flatten contour array to contour coordinates
+            mask_cX, mask_cY = cv2.minAreaRect(_coords)[0]  # fit field mask to contour
+            img_h, img_w = self.img.shape[:2]; img_cX, img_cY = img_w // 2, img_h // 2  # get image parameters
+
+            # determine distance between image center and mask center for direction x and y
+            x_dist = img_cX - mask_cX; y_dist = img_cY - mask_cY
+            ideal_x_dist = point_to_space(0, 1, npa=True) - point_to_space(0, 0, npa=True)
+            ideal_y_dist = point_to_space(1, 0, npa=True) - point_to_space(0, 0, npa=True)
+
+            index_mask = self.grid_shift(index_mask, point_to_space, x=round(x_dist / ideal_x_dist[0]),
+                                         y=round(y_dist / ideal_y_dist[1]))
 
         # write control image for manual evaluation
         _elementary_masking_path = r'{}\elementary_masking'.format(r'{}\_misc'.format(self.dirs['OutputFolder']))
         if not os.path.exists(_elementary_masking_path):
+            try:  # catch overlapping file path creation from simultaneous processes
                 os.makedirs(_elementary_masking_path)
+            except FileExistsError:
+                pass
 
         _img = cv2.cvtColor(self.img, cv2.COLOR_GRAY2BGR)
         font_scale = 3 / 8700 * _img.shape[1]
-        cv2.drawContours(_img, mask_contours, -1, (0, 255, 255), 10)
+        cv2.drawContours(_img, list(index_mask.values()), -1, (0, 255, 255), 10)
         for center, vector, mag, pg in zip(contour_grid[1], contour_vectors, contour_magnitudes, point_grid.keys()):
             cv2.putText(_img, str(np.int64(mag)), (int(center[0] - 200), int(center[1] + 150)),
                         cv2.FONT_HERSHEY_SIMPLEX,
@@ -735,7 +821,9 @@ class MaskConstruction:
                 'Width': width,
                 'Height': height,
                 'MaskingMethod': mask_settings['MaskingMethod'],
-                'MaskShift': mask_settings['MaskShift']
+                'MaskShift': mask_settings['MaskShift'],
+                'IterativeFidelity': mask_settings['IterativeFidelity'],
+                'OnsetIntensitySpan': trimmed_onset_intensity_span
             },
             'QualityParameters': {
                 'Level': norm_rel_area * norm_ratio * 1e5,  # this is an arbitrary scalar (lower is better)
@@ -744,22 +832,38 @@ class MaskConstruction:
             },
             'MiscParameters': {
                 'UsedRealFields': len(real_indices),
-                'UsedComputedFields': len(mask_contours) - len(real_indices),
+                'UsedComputedFields': len(index_mask.values()) - len(real_indices),
             }
         }}}
 
-        supports.json_dict_push(r'{}\Settings.json'.format(self.dirs['OutputFolder']), update_dict, behavior='update')
-        update_dict['PreprocessedParameters'][self.metadata['FileName']]['DrawParameters'] = {
+        self.draw_parameters = update_dict
+
+        self.draw_parameters['PreprocessedParameters'][self.metadata['FileName']]['DrawParameters'] = {
             'RealFieldIndices': real_indices,
         }
 
-        self.draw_parameters = update_dict
-
         if kwargs['return_settings'] is False:
-            return index_mask
+            return index_mask, update_dict
         else:
             settings = update_dict['PreprocessedParameters'][self.metadata['FileName']]
             return index_mask, settings
+
+    def grid_shift(self, mask, cfunc, x=0, y=0) -> dict:
+        """Shifts the index mask dict according to the specified shift and the conversion function.
+        :param mask: the index mask dict.
+        :param cfunc: the point-to-vector function/conversion function for the grid positions to real coordinates."""
+
+        _ = {}; x_shift = 0; y_shift = 0
+        if x != 0:
+            x_shift = cfunc(0, x, npa=True) - cfunc(0, 0, npa=True)
+            supports.tprint('Shifting mask for %s with %d columns.' % (self.metadata['FileName'], x))
+        if y != 0:
+            y_shift = cfunc(y, 0, npa=True) - cfunc(0, 0, npa=True)
+            supports.tprint('Shifting mask for %s with %d rows.' % (self.metadata['FileName'], y))
+
+        for k, v in mask.items():
+            _[k] = np.int64(v + x_shift + y_shift)
+        return _
 
     @staticmethod
     def pack_best_field(cnt):
@@ -777,62 +881,82 @@ class MaskConstruction:
         field = (contour[0], _cX, _cY, _w, _h, _a, contour[-1])
         return field
 
-    def single_field_identification(self, onset_intensity, intensity_span):
-        mask_settings = self.__settings['IndividualPreprocessSettings'][self.metadata['FileName']]
-
-        # find the field contour
+    def _single_field_iterator(self, error):
+        _if = self.__settings['IndividualPreprocessSettings'][self.metadata['FileName']]['IterativeFidelity']
         method_prefix = 'Otsu'
-        thresh_img = cv2.threshold(self.blur_image, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]  # convert to binary
-        stop = False; _k = 2; field = None
+        thresh_img = cv2.threshold(self.blur_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        stop = False; _k = 3 - _if; field = None
         while not stop:  # attempt masking on otsu threshold
-            _k += 1
+            _k += _if
             morph_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (_k, _k))  # define morphology kernel
             morph_img = cv2.morphologyEx(thresh_img, cv2.MORPH_CLOSE, morph_kernel,
                                          iterations=2)  # apply morphology to threshold
             cont = cv2.findContours(morph_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[0]  # find contours
-            cnt = self.__contour_filter(cont, pae=.01, pre=.01)
+            cnt = self.__contour_filter(cont, pae=error, pre=error)
 
             if cnt:
                 stop = True
                 field = self.pack_best_field(cnt)
+                self.TP = _k
 
             elif _k > 100:
                 stop = True
-                supports.tprint('Otsu threshold failed for %s; attempting adaptive thresholding.' % self.metadata['FileName'])
+                supports.tprint(
+                    'Otsu threshold failed for %s; attempting adaptive thresholding.' % self.metadata['FileName'])
 
         if field is None:
             method_prefix = 'Adaptive'
-            stop = False; _b, _c = 9, 2
+            stop = False; _b, _c = 11 - _if, 2
             while not stop:  # attempt masking with adaptive thresholding
-                _b += 2; _c += 0
+                _b += _if; _c += 0
                 thresh_img = cv2.adaptiveThreshold(self.blur_image, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
                                                    cv2.THRESH_BINARY_INV, _b, _c)
                 cont = cv2.findContours(thresh_img, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)[0]  # find contours
-                cnt = self.__contour_filter(cont, pae=.01, pre=.01)
+                cnt = self.__contour_filter(cont, pae=error, pre=error)
 
                 if cnt:
                     stop = True
                     field = self.pack_best_field(cnt)
+                    self.TP = _b
 
                 elif _b > 100:
                     stop = True
                     supports.tprint(
-                        'Adaptive threshold failed for %s; attempting iterative thresholding.' % self.metadata['FileName'])
+                        'Adaptive threshold failed for %s; attempting iterative thresholding.' % self.metadata[
+                            'FileName'])
 
         if field is None:
             method_prefix = 'Iterative'
-            stop = False; _oi = -1
+            stop = False; _oi = -_if
             while not stop:  # attempt masking with adaptive thresholding
-                _oi += 1
-                cont, _ = self.__contour_detect(_oi, intensity_span)  # detect contours
-                cnt = self.__contour_filter(cont)  # find a rough estimate of the fields in the image
+                _oi += _if
+                cont, _ = self.__contour_detect(_oi, 200)  # detect contours
+                cnt = self.__contour_filter(cont, pae=error, pre=error)
 
                 if cnt:
                     stop = True
                     field = self.pack_best_field(cnt)
+                    self.TP = _oi
 
                 elif _oi > 253:
-                    raise RuntimeError('Mask field could not be identified.')
+                    stop = True
+                    supports.tprint(
+                        'Iterative threshold failed for %s; increasing error allowance by .01.' % self.metadata[
+                            'FileName'])
+        return field, method_prefix
+
+    def single_field_identification(self):
+        mask_settings = self.__settings['IndividualPreprocessSettings'][self.metadata['FileName']]
+        mask_settings['MaskingMethod'] = mask_settings['MaskingMethod'].split(' ')[-1]  # ensure correct choice load
+
+        # find the field contour
+        field = None; stop = False; error = .01; method_prefix = None
+        while not stop:
+            field, method_prefix = self._single_field_iterator(error)
+            if field is not None: stop = True
+            if error > .1: raise RuntimeError('Mask field could not be identified for %s, as error limit was reached.'
+                                               % self.metadata['FileName'])
+            error += .01
 
         # define field dimensions along with all unique contours
         cX, cY, width, height, angle = field[1:-1]
@@ -860,7 +984,8 @@ class MaskConstruction:
                 'Width': width,
                 'Height': height,
                 'MaskingMethod': ' '.join([method_prefix, mask_settings['MaskingMethod']]),
-                'TP': _b if method_prefix == 'Adaptive' else _oi if method_prefix == 'Iterative' else _k,
+                'TP': self.TP,
+                'IterativeFidelity': mask_settings['IterativeFidelity'],
             },
             'QualityParameters': {
                 'Level': norm_rel_area * norm_ratio * 1e5,  # this is an arbitrary scalar (lower is better)
@@ -869,65 +994,66 @@ class MaskConstruction:
             },
         }}}
 
-        supports.json_dict_push(r'{}\Settings.json'.format(self.dirs['OutputFolder']), update_dict, behavior='update')
         self.draw_parameters = update_dict
 
-        return [contour]
+        return [contour], update_dict
 
 
 class ProcessingHandler:
     def __init__(self):
         self.dirs = supports.setting_cache()['DirectorySettings']
         self.__settings = supports.json_dict_push(r'{}\Settings.json'.format(self.dirs['OutputFolder']), behavior='read')
-        self.__data_dict = {'FieldData': {}, 'CellDistribution': {}}
-        self.__data_columns = {'FieldData': ('Cell Count', 'Area Cell Count', 'Mean Cell Distribution (µm)',
-                                             'Std Cell Distribution (µm)'),
-                               'CellDistribution': ('NN Distances (µm)', 'NN Distances (pix)')}
 
     def process(self, file):
         _cps = self.__settings['CollectionProcessSettings']  # set collection settings
-        field_path = r'{}\{}\{}'.format(self.dirs['OutputFolder'], file, _cps['CellChannel'])
-        fields = [f.removeprefix('_').removesuffix('.tiff') for f in os.listdir(field_path) if f.endswith('.tiff')]
-        _ips = self.__settings['IndividualProcessSettings'][file]  # set individual settings
         scale_bar = self.__settings['PreprocessedParameters'][file]['FieldParameters']['ScaleBar']
         cell_params = SampleParameters(scale_bar ** -1, configure=_cps['CellType'])
         mask_data = supports.json_dict_push(r'{}\{}\maskdata.json'.format(self.dirs['OutputFolder'], file),
                                             behavior='read')
-        # bar = tqdm.tqdm(total=len(fields), leave=True, desc='>>>   Processing ')
 
-        # check output directory validity and ensure that it is empty
-        directory_checker(rf'{field_path} (Processed)', clean=True)
+        # fetch previous data if possible
+        json_path = r'{}\{}\data.json'.format(self.dirs['OutputFolder'], file)
+        if os.path.exists(json_path):
+            prev_data = supports.json_dict_push(json_path, behavior='read')
+        else:
+            prev_data = {'NucleiFieldData': {}, 'MorphologyFieldData': {}, 'CellData': {}}
 
-        field_data_dfs, cell_data_dfs = [], []  # placeholder for dataframes
+        nuclei_data_dfs, cell_data_dfs, morph_data_dfs = [], [], []  # placeholder for dataframes
         write_json = False
-        for field in fields:
-            # bar.set_description(f'>>>   Preprocessing {field}')
-            img = cv2.imread(rf'{field_path}\_{field}.tiff')
-            h, w = img.shape[0:2]
-            _edge = int(_cps['EdgeProximity'] * scale_bar)  # save edge filter in pixels
+        cell_count = None
+        if _cps['NucleiChannel'] is not None:
+            write_json = True
+            field_path = r'{}\{}\{}'.format(self.dirs['OutputFolder'], file, _cps['NucleiChannel'])
+            fields = [f.removeprefix('_').removesuffix('.tiff') for f in os.listdir(field_path) if f.endswith('.tiff')]
+            _ips = self.__settings['IndividualProcessSettings'][file]  # set individual settings
 
-            # draw field contour and permitted edge on image
-            rect = mask_data['ContourMask'][field]['MinAreaRect']
-            cv2.drawContours(img, [np.int64(cv2.boxPoints(rect))], -1, (0, 0, 255), 1)
-            rect[1][0] -= _edge * 2; rect[1][1] -= _edge * 2  # remove edge
-            edge_field = np.int64(cv2.boxPoints(rect))
-            cv2.drawContours(img, [edge_field], -1, (0, 255, 0), 1)
+            # check output directory validity and ensure that it is empty
+            directory_checker(rf'{field_path} (Processed)', clean=True)
+            sc_path = r'{}\{}\Seeding Scores'.format(self.dirs['OutputFolder'], file)
+            directory_checker(sc_path, clean=True)
 
-            if True:
-                write_json = True; _binary = None
+            for field in fields:
+                img = cv2.imread(rf'{field_path}\_{field}.tiff')
+                h, w = img.shape[0:2]
+                _edge = int(_cps['EdgeProximity'] * scale_bar)  # save edge filter in pixels
+
+                # draw field contour and permitted edge on image
+                rect = mask_data['ContourMask'][field]['MinAreaRect']
+                cv2.drawContours(img, [np.int64(cv2.boxPoints(rect))], -1, (0, 0, 255), 1)
+                edge_box = [rect[0], [rect[1][0] - _edge * 2, rect[1][1] - _edge * 2], rect[2]]
+                edge_field = np.int64(cv2.boxPoints(edge_box))
+                cv2.drawContours(img, [edge_field], -1, (0, 255, 0), 1)
+
+                _binary = None
                 if _ips['CountingMethod'] == 'Hough':
                     _count, _binary = hough_circles_cell_counting(img, cell_params)
                 elif _ips['CountingMethod'] == 'Classic':
                     _count, _binary = threshold_cell_counting(img, cell_params)
                 elif _ips['CountingMethod'] == 'CCA':
-                    # _count, _binary = cca_cell_counting(img, 11, 3, 3)
-
                     _cd = analysis.CellDetector(img)
                     _cd.connected_component_counting(_ips['SliceSize'])
                     _count = _cd.points
-
                 elif _ips['CountingMethod'] == 'Black-Out':
-
                     _cd = analysis.CellDetector(img)
                     _cd.image_iterator(_ips['SliceSize'], expand_cycles=_ips['Cycles'], expand_onset=_ips['Filter'],
                                        expand_step_size=_ips['Step'])
@@ -945,7 +1071,6 @@ class ProcessingHandler:
                     else:
                         cX, cY, r = c
 
-                    # if _edge < cY < h - _edge and _edge < cX < w - _edge:
                     if cv2.pointPolygonTest(edge_field, (cX, cY), False) > 0:
                         if _ips['CountingMethod'] == 'Hough':
                             cv2.circle(img, (int(cX), int(cY)), int(r), (0, 255, 0), 1)
@@ -969,12 +1094,19 @@ class ProcessingHandler:
                     cell_coverage = np.where(_binary[_edge:w - _edge, _edge:h - _edge].flatten() == 255)[0].size
                     area_cell_count = cell_coverage // mean_nuclei_area
 
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                cell_image = np.zeros_like(gray)
+                seeding_mask = np.zeros_like(gray)
+                cv2.drawContours(seeding_mask, [edge_field], -1, (255, 255, 255), -1)
+
                 # estimate nearest neighbour distances for found valid cells and write the average on image
-                if cell_count != 0:
+                ideal_nnd = np.sqrt(1 / self.__settings['CollectionProcessSettings']['SeedingDensity'] * 1e4 ** 2)
+                if cell_count > 1:  # analysis can only proceed with 2 or more cells, otherwise NNDs will be invalid
                     nearest_cell_distances = nearest_neighbors(valid_cells)
                     for i in range(cell_count):
                         cX, cY = valid_cells[i]
                         r = nearest_cell_distances[i]
+
                         if _ips['CountingMethod'] == 'Hough':
                             cv2.circle(img, (int(cX), int(cY)), int(r), (0, 127, 0), 1)
                         elif _ips['CountingMethod'] == 'Classic':
@@ -983,28 +1115,54 @@ class ProcessingHandler:
                             cv2.circle(img, (int(cX), int(cY)), int(r), (0, 127, 127), 1)
                         elif _ips['CountingMethod'] == 'CCA':
                             cv2.circle(img, (int(cX), int(cY)), int(r), (127, 0, 127), 1)
+
+                        # add NND area to cell_image
+                        cv2.circle(cell_image, (int(cX), int(cY)), int(ideal_nnd * scale_bar), (255, 255, 255), -1)
                 else:
+                    supports.tprint(f'No cells could be identified for {file} field {field}.')
                     nearest_cell_distances = []
+
+                # mask NND cell_image and score seeding
+                masked_img = cv2.bitwise_and(cell_image, cell_image, mask=seeding_mask)
+                cell_area = masked_img[masked_img == 255].size  # count white pixels
+                seeding_score = cell_area / cv2.contourArea(edge_field)
+                seeding_score = seeding_score if seeding_score <= 1 else 1  # prevent overflow values
+                masked_img = cv2.cvtColor(masked_img, cv2.COLOR_GRAY2BGR)
+                cv2.drawContours(masked_img, [np.int64(cv2.boxPoints(rect))], -1, (0, 0, 255), 1)
+                cv2.drawContours(masked_img, [edge_field], -1, (0, 255, 0), 1)
+
+                # draw data on the seeding score image and write
+                text_overlay = Image.fromarray(masked_img)
+                text_font = ImageFont.truetype(rf'{supports.__cwd__}\__misc__\Arial.ttf', 60 / 3850 * w)
+                text_text = (f'Maximum-Ideal NND: {ideal_nnd:.2f} µm\n'
+                             f'Seeding Score: {seeding_score * 100:.2f}%')
+                text_draw = ImageDraw.Draw(text_overlay)
+                if seeding_score > .9:
+                    text_draw.text((w // 50, h // 50 + 12), text_text, font=text_font, fill=(0, 200, 0))
+                elif .75 < seeding_score <= .9:
+                    text_draw.text((w // 50, h // 50 + 12), text_text, font=text_font, fill=(0, 200, 200))
+                else:
+                    text_draw.text((w // 50, h // 50 + 12), text_text, font=text_font, fill=(0, 0, 200))
+                cv2.imwrite(r'{}\_{}_ss.tiff'.format(sc_path, field), np.array(text_overlay))
 
                 # Note that the std is the sample std not the population std
                 _mean_distribution = np.mean(nearest_cell_distances) / scale_bar
                 _distribution_std = np.std(nearest_cell_distances, ddof=1) / scale_bar
 
-                # put data text on the image
+                # put data text on nuclei image
                 text_overlay = Image.fromarray(img)
-                text_font = ImageFont.truetype(rf'{supports.__cwd__}\__misc__\Arial.ttf', 60 / 3850 * w)
                 text_text = (f'Cells: {cell_count}     Density: {cell_density} c/cm²\n'
                              f'Distribution: {_mean_distribution:.2f} ± {_distribution_std:.2f}')
                 text_draw = ImageDraw.Draw(text_overlay)
                 text_draw.text((w // 50, h // 50 + 12), text_text, font=text_font, fill=(255, 255, 255))
                 img = np.array(text_overlay)
 
-                _fd_df = pd.DataFrame([[cell_count, area_cell_count, _mean_distribution, _distribution_std,
-                                        cell_density]],
+                _nd_df = pd.DataFrame([[cell_count, area_cell_count, _mean_distribution, _distribution_std,
+                                        cell_density, seeding_score]],
                                       index=[field],
                                       columns=['Cell Count', 'Area Cell Count', 'Mean Cell Distribution (µm)',
-                                               'Std Cell Distribution (µm)', 'Cell Density'])
-                field_data_dfs.append(_fd_df)
+                                               'Std Cell Distribution (µm)', 'Cell Density', 'Seeding Score'])
+                nuclei_data_dfs.append(_nd_df)
 
                 _cd_df = pd.DataFrame([[i / scale_bar for i in nearest_cell_distances], nearest_cell_distances],
                                       index=['NN Distances (µm)', 'NN Distances (pix)'])
@@ -1012,17 +1170,84 @@ class ProcessingHandler:
 
                 # write output image
                 cv2.imwrite(r'{} (Processed)\_{}_{}_processed.tiff'.format(
-                    field_path, field, _cps['CellChannel']), img)
-        #     bar.update(1)
-        # bar.close()
-        # bar.refresh()
+                    field_path, field, _cps['NucleiChannel']), img)
+
+        if _cps['MorphologyChannel'] is not None:
+            write_json = True
+            field_path = r'{}\{}\{}'.format(self.dirs['OutputFolder'], file, _cps['MorphologyChannel'])
+            fields = [f.removeprefix('_').removesuffix('.tiff') for f in os.listdir(field_path) if f.endswith('.tiff')]
+
+            # check output directory validity and ensure that it is empty
+            directory_checker(rf'{field_path} (Processed)', clean=True)
+
+            for field in fields:
+                img = cv2.imread(rf'{field_path}\_{field}.tiff')
+                h, w = img.shape[0:2]
+                _edge = int(_cps['EdgeProximity'] * scale_bar)  # save edge filter in pixels
+
+                # draw field contour and determine permitted edge on image
+                rect = mask_data['ContourMask'][field]['MinAreaRect']
+                cv2.drawContours(img, [np.int64(cv2.boxPoints(rect))], -1, (0, 0, 255), 1)
+                edge_box = [rect[0], [rect[1][0] - _edge * 2, rect[1][1] - _edge * 2], rect[2]]
+                edge_field = np.int64(cv2.boxPoints(edge_box))
+
+                # mask input field image with the permitted field edge
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                mask = np.zeros_like(gray)
+                cv2.drawContours(mask, [edge_field], -1, (255, 255, 255), -1)
+                masked_img = cv2.bitwise_and(gray, gray, mask=mask)
+
+                if _cps['ThresholdIntensity'] > 0:
+                    thresh = cv2.threshold(masked_img, _cps['ThresholdIntensity'], 255, cv2.THRESH_BINARY)[1]
+                else:
+                    thresh = cv2.threshold(masked_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+
+                cell_area = thresh[thresh == 255].size
+                cell_coverage = cell_area / cv2.contourArea(edge_field)
+                text_text = f'Cell Coverage: {cell_coverage * 100:.2f}%\n'
+
+                cell_spreading = None
+                if cell_count in (None, 0) and 'Cell Count' in prev_data['NucleiFieldData']:
+                    cell_count = prev_data['NucleiFieldData']['Cell Count'][field]
+
+                if cell_count:
+                    cell_spreading = cell_area / scale_bar ** 2 / cell_count
+                    text_text += f'Average Cell Area: {cell_spreading:.2f} µm²/c'
+
+                # put data text on the image
+                text_overlay = Image.fromarray(img)
+                text_font = ImageFont.truetype(rf'{supports.__cwd__}\__misc__\Arial.ttf', 60 / 3850 * w)
+                text_draw = ImageDraw.Draw(text_overlay)
+                text_draw.text((w // 50, h // 50 + 12), text_text, font=text_font, fill=(255, 255, 255))
+                img = np.array(text_overlay)
+
+                col_thresh = supports.colorize(cv2.cvtColor(thresh, cv2.COLOR_GRAY2RGBA), '#16f1f5', 'white')
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGBA); img = cv2.add(img, col_thresh)  # add cell area to img
+                img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)  # revert to old color type
+                cv2.drawContours(img, [edge_field], -1, (0, 255, 0), 1)  # draw permitted edge
+
+                _md_df = pd.DataFrame([[cell_coverage, cell_spreading]],
+                                      index=[field],
+                                      columns=['Cell Coverage', 'Average Cell Area (µm^2/c)'])
+                morph_data_dfs.append(_md_df)
+
+                # write output image
+                cv2.imwrite(r'{} (Processed)\_{}_{}_processed.tiff'.format(
+                    field_path, field, _cps['MorphologyChannel']), img)
 
         # collect and store the determined variables in a json file at the data position
         if write_json is True:
-            field_data_df = pd.concat(field_data_dfs, axis=0)
-            cell_data_df = pd.concat(cell_data_dfs, axis=1, ignore_index=True).T
-            data_dict = {'FieldData': field_data_df.to_dict(), 'CellData': cell_data_df.to_dict()}
-            supports.json_dict_push(r'{}\{}\data.json'.format(self.dirs['OutputFolder'], file), params=data_dict, behavior='replace')
+            nucleiDF = pd.concat(nuclei_data_dfs, axis=0) if nuclei_data_dfs else pd.DataFrame()
+            morphDF = pd.concat(morph_data_dfs, axis=0) if morph_data_dfs else pd.DataFrame()
+            cellDF = pd.concat(cell_data_dfs, axis=1, ignore_index=True).T if cell_data_dfs else pd.DataFrame()
+
+            data_dict = {
+                'NucleiFieldData': nucleiDF.to_dict() if not nucleiDF.empty else prev_data['NucleiFieldData'],
+                'MorphologyFieldData': morphDF.to_dict() if not morphDF.empty else prev_data['MorphologyFieldData'],
+                'CellData': cellDF.to_dict() if not cellDF.empty else prev_data['CellData']
+            }
+
+            supports.json_dict_push(json_path, params=data_dict, behavior='mutate')
         return file
 
 
@@ -1040,15 +1265,15 @@ class AnalysisHandler:
 
         if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
             self.normalize_multi_field_data()
-        elif self['CollectionPreprocessSettings']['SampleType'] == 'Single-Field':
+        elif self['CollectionPreprocessSettings']['SampleType'] in ('Single-Field', 'Zero-Field'):
             self.normalize_single_field_data()
 
-        _da = analysis.DataAnalysis(self.data, self.__settings)
+        _da = analysis.DataAnalysis(self.data)
         _da.group_data()
         if self['CollectionAnalysisSettings']['AnalyzeData']['NucleiAnalysis']:
             if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
                 _da.multi_field_nuclei_analysis()
-            elif self['CollectionPreprocessSettings']['SampleType'] == 'Single-Field':
+            elif self['CollectionPreprocessSettings']['SampleType'] in ('Single-Field', 'Zero-Field'):
                 _da.single_field_nuclei_analysis()
         if self['CollectionAnalysisSettings']['AnalyzeData']['NearestNeighbourHistogram']:
             _da.nearest_neighbour_analysis()
@@ -1058,8 +1283,12 @@ class AnalysisHandler:
     def normalize_multi_field_data(self):
         """Internal method that normalizes multi-field data."""
 
-        push_sheets = ('Cell Count', 'Normalized Cell Count', 'Area Cell Count', 'Mean Cell Distribution (µm)',
-                       'Std Cell Distribution (µm)', 'NN Distances (µm)', 'NN Distances (pix)')  # define sheet names
+        push_sheets = ['Cell Count', 'Normalized Cell Count', 'Area Cell Count', 'Mean Cell Distribution (µm)',
+                       'Std Cell Distribution (µm)', 'Cell Density', 'Seeding Score', 'SC Normalized Cell Count',
+                       'NN Distances (µm)', 'NN Distances (pix)']  # define sheet names
+        if self['CollectionAnalysisSettings']['MorphologyAnalysis'] is True:
+            push_sheets += ['Average Cell Area (µm^2/c)', 'Cell Coverage', 'Normalized Cell Coverage',
+                            'Normalized Cell Area', 'SC Normalized Cell Coverage']
 
         # load processed image data
         datas = []
@@ -1068,22 +1297,51 @@ class AnalysisHandler:
             file_name_columns = dict(zip(push_sheets, [file, ] * len(push_sheets)))  # set column names
             if os.path.isfile(json_data_dir):  # if stored data exists, read it and construct dataframes
                 json_data = supports.json_dict_push(json_data_dir, behavior='read')
-                field_data_df = pd.DataFrame(json_data['FieldData']).rename(columns=file_name_columns)
+                nucleiDF = pd.DataFrame(json_data['NucleiFieldData']).rename(columns=file_name_columns)
                 cell_data_df = pd.DataFrame(json_data['CellData']).rename(columns=file_name_columns)
-                cell_counts = field_data_df.iloc[:, 0:1]
+                cell_counts = nucleiDF.iloc[:, 0:1]; seeding_score_df = nucleiDF.iloc[:, 5:6]
                 norm_cell_count_df = cell_counts.copy()  # default normalized cell counts to the cell counts
+                sc_norm_cell_count_df = cell_counts.copy()  # default normalized cell counts to the cell counts
 
-                # normalize cell count data according to the selected fields
+                # normalize cell count data according to control fields
                 control_fields = self['CollectionAnalysisSettings']['SampleTypeSettings']['ControlFields']
                 control_counts = [cell_counts.loc[cf, file] for cf in control_fields]
                 _mean, _std = np.mean(control_counts), np.std(control_counts, ddof=1)
                 _ = {'AdditionalData': {'InternalControlCountMean': _mean, 'InternalControlCountStd': _std}}
-                supports.json_dict_push(json_data_dir, params=_, behavior='update')
                 norm_cell_count_df[file] = norm_cell_count_df[file].div(_mean)
+                sc_norm_cell_count_df[file] = norm_cell_count_df[file].div(seeding_score_df[file], axis=0).replace(np.inf, 0)
 
                 # append dataframes to list
-                push_dfs = (cell_counts, norm_cell_count_df, field_data_df.iloc[:, 1:2], field_data_df.iloc[:, 2:3],
-                            field_data_df.iloc[:, 3:4], cell_data_df.iloc[:, 0:1], cell_data_df.iloc[:, 1:2])
+                push_dfs = [cell_counts, norm_cell_count_df, nucleiDF.iloc[:, 1:2], nucleiDF.iloc[:, 2:3],
+                            nucleiDF.iloc[:, 3:4], nucleiDF.iloc[:, 4:5], seeding_score_df,
+                            sc_norm_cell_count_df, cell_data_df.iloc[:, 0:1], cell_data_df.iloc[:, 1:2]]
+
+                # add morphology data normalization if prompted
+                if self['CollectionAnalysisSettings']['MorphologyAnalysis'] is True:
+                    morphDF = pd.DataFrame(json_data['MorphologyFieldData']).rename(columns=file_name_columns)
+                    cell_coverages = morphDF.iloc[:, 0:1]; norm_cell_coverage_df = cell_coverages.copy()
+                    cell_areas = morphDF.iloc[:, 1:2]; norm_cell_area_df = cell_areas.copy()
+                    sc_norm_cell_coverage_df = cell_coverages.copy()
+
+                    # normalize cell coverage to control fields
+                    control_coverages = [cell_coverages.loc[cf, file] for cf in control_fields]
+                    _mean, _std = np.mean(control_coverages), np.std(control_coverages, ddof=1)
+                    _['AdditionalData']['InternalControlCoverageMean'] = _mean
+                    _['AdditionalData']['InternalControlCoverageStd'] = _std
+                    norm_cell_coverage_df[file] = norm_cell_coverage_df[file].div(_mean)
+                    sc_norm_cell_coverage_df[file] = norm_cell_coverage_df[file].div(seeding_score_df[file], axis=0).replace(np.inf, 0)
+
+                    # normalize cell area to control fields
+                    control_areas = [cell_areas.loc[cf, file] for cf in control_fields]
+                    _mean, _std = np.mean(control_areas), np.std(control_areas, ddof=1)
+                    _['AdditionalData']['InternalControlAreaMean'] = _mean
+                    _['AdditionalData']['InternalControlAreaStd'] = _std
+                    norm_cell_area_df[file] = norm_cell_area_df[file].div(_mean)
+
+                    push_dfs += [cell_areas, cell_coverages, norm_cell_coverage_df, norm_cell_area_df,
+                                 sc_norm_cell_coverage_df]
+
+                supports.json_dict_push(json_data_dir, params=_, behavior='update')
                 datas.append(push_dfs)
 
         data_sets = [pd.concat(i, axis=1) for i in zip(*datas)]  # transform data sets and merge
@@ -1098,15 +1356,38 @@ class AnalysisHandler:
 
         sheets = ('Collection Data', 'NN Distances (µm)', 'NN Distances (pix)')  # define sheet names
         collection_data = ['Cell Count', 'Normalized Cell Count', 'Area Cell Count', 'Mean Cell Distribution (µm)',
-                       'Std Cell Distribution (µm)']
+                           'Std Cell Distribution (µm)', 'Cell Density', 'Seeding Score', 'SC Cell Count',
+                           'SC Normalized Cell Count', 'SC Cell Density']
         _erg = self['CollectionAnalysisSettings']['SampleTypeSettings']['ExternalReferenceGroup']
+
+        _entries = ['SC Cell Count', 'Normalized Cell Count', 'SC Normalized Cell Count', 'SC Cell Density']
+        if self['CollectionAnalysisSettings']['MorphologyAnalysis'] is True:
+            collection_data += ['Average Cell Area (µm^2/c)', 'Cell Coverage', 'Normalized Cell Coverage',
+                                'SC Cell Coverage', 'SC Normalized Cell Coverage']
+            _entries += ['SC Cell Coverage', 'Normalized Cell Coverage', 'SC Normalized Cell Coverage']
 
         # load processed image data
         datas = []; reference_group = []
-        for file in self['IndividualProcessSettings'].keys():  # iterate through processed files
+        for file, state in self['IndividualAnalysisSettings'].items():  # iterate through processed files
             json_data_dir = rf'{self.__out_dir}\{file}\data.json'  # set data directory
-            if os.path.isfile(json_data_dir):  # if stored data exists, read it and construct dataframes
+
+            if os.path.isfile(json_data_dir) and state['State'] is True:  # if stored data exists, read it and construct dataframes
                 json_data = supports.json_dict_push(json_data_dir, behavior='read')
+
+                _skip_file = False
+                if (json_data['NucleiFieldData']['Seeding Score'][file] <
+                        self['CollectionAnalysisSettings']['SampleTypeSettings']['SeedingScoreCriterion']):
+                    _skip_file = True
+                    supports.tprint(rf'Seeding score for {file} is below the criterion. Skipping analysis for file.')
+                elif json_data['NucleiFieldData']['Cell Count'][file] < 2:
+                    _skip_file = True
+                    supports.tprint(rf'Nuclei count for {file} is below  2. Skipping analysis for file.')
+
+                if _skip_file is True:
+                    _ = {'IndividualAnalysisSettings': {file: {'State': False}}}
+                    supports.json_dict_push(rf'{self.__out_dir}\Settings.json', params=_, behavior='update')
+                    continue  # skip file if it falls below the seeding score criterion
+
                 cd_DF = pd.DataFrame(columns=collection_data, index=[file])  # placeholder dataframe
 
                 nnd_DFs = []
@@ -1115,24 +1396,49 @@ class AnalysisHandler:
                     nnd_DFs.append(pd.DataFrame(_.values(), index=_.keys(), columns=[file]).T)
 
                 # add data entries
-                json_data['FieldData']['Normalized Cell Count'] = json_data['FieldData']['Cell Count']
-                for k, v in json_data['FieldData'].items():
-                    cd_DF[k] = v
+                for de in _entries:
+                    for _end in ('Cell Count', 'Cell Density', 'Cell Coverage'):
+                        if de.endswith(_end):
+                            if _end == 'Cell Coverage':
+                                json_data['MorphologyFieldData'][de] = json_data['MorphologyFieldData'][_end]
+                            else:
+                                json_data['NucleiFieldData'][de] = json_data['NucleiFieldData'][_end]
+
+                for i in ('Morphology', 'Nuclei'):
+                    if f'{i}FieldData' in json_data:
+                        for k, v in json_data[f'{i}FieldData'].items():
+                            cd_DF[k] = v
 
                 if _erg != 'None' and self['IndividualAnalysisSettings'][file]['DataGroup'] == _erg:
-                    reference_group.append(cd_DF['Cell Count'])
+                    if self['CollectionAnalysisSettings']['MorphologyAnalysis'] is True:
+                        reference_group.append([cd_DF['Cell Count'].values[0], cd_DF['Cell Coverage'].values[0]])
+                    else:
+                        reference_group.append([cd_DF['Cell Count'].values[0]])
 
                 datas.append((cd_DF, *nnd_DFs))
 
         data_sets = [pd.concat(i, axis=0) for i in zip(*datas)]  # transform data sets and merge
+        for k in data_sets[0].keys():
+            if k.startswith('SC'):  # perform seeding correction on data set
+                data_sets[0][k] = data_sets[0][k].div(data_sets[0]['Seeding Score'], axis=0)
         if _erg != 'None':
-            _mean, _std = np.mean(reference_group), np.std(reference_group, ddof=1)
+            _mean, _std = np.mean(reference_group, axis=0), np.std(reference_group, ddof=1, axis=0)
             _ = {'AdditionalData': {  # add additional data to file
                 'ExternalReferenceGroup': _erg,
-                'ExternalReferenceCountMean': _mean,
-                'ExternalReferenceCountStd': _std}}
-            supports.json_dict_push(rf'{self.__out_dir}\AnalyzedResults.txt', params=_, behavior='update')
-            data_sets[0]['Normalized Cell Count'] = data_sets[0]['Normalized Cell Count'].div(_mean)
+                'ExternalReferenceCountMean': _mean[0],
+                'ExternalReferenceCountStd': _std[0],
+            }}
+
+            if self['CollectionAnalysisSettings']['MorphologyAnalysis'] is True:
+                _['AdditionalData']['ExternalReferenceCoverageMean'] = _mean[1]
+                _['AdditionalData']['ExternalReferenceCoverageStd'] = _std[1]
+
+            supports.json_dict_push(rf'{self.__out_dir}\AnalysisResults.json', params=_, behavior='update')
+            for ds in ('Normalized Cell Count', 'SC Normalized Cell Count'):
+                data_sets[0][ds] = data_sets[0][ds].div(_mean[0])
+            if self['CollectionAnalysisSettings']['MorphologyAnalysis'] is True:
+                for ds in ('Normalized Cell Coverage', 'SC Normalized Cell Coverage'):
+                    data_sets[0][ds] = data_sets[0][ds].div(_mean[1])
         data_sets[1] = data_sets[1].T; data_sets[2] = data_sets[2].T  # flip axis on nnd data
 
         self.data = dict(zip(sheets, data_sets))  # construct data dict for analysis
@@ -1147,6 +1453,7 @@ class FieldCodeHandler:
         self.codes = codes
         self.sep_codes = None
         self.sor_codes = None
+        self.id_codes = None
 
     def split_codes(self, delimiters, **kwargs):
         """Method that splits field codes according to delimiters and kwargs."""
@@ -1193,7 +1500,8 @@ class FieldCodeHandler:
         """Method that sorts field codes according to the input indices and separated codes."""
 
         pars = {
-            'reverse_order': False
+            'reverse_order': False,
+            'field_codes': None
         }
 
         for k, v in pars.items():
@@ -1203,16 +1511,43 @@ class FieldCodeHandler:
         _ = []
         for i in indices:  # shift negative indices to match the code-appended list set
             if i < 0:
-                _.append(i - 1)
+                if kwargs['field_codes'] is not None:
+                    _.append(i - 2)
+                else:
+                    _.append(i - 1)
             else:
                 _.append(i)
         indices = _
-        sort_codes = [i + [j] for i, j in zip(self.sep_codes, self.codes)]
+
+        if kwargs['field_codes'] is None:
+            sort_codes = [i + [j] for i, j in zip(self.sep_codes, self.codes)]
+        else:
+            sort_codes = [i + [k] + [j] for i, j, k in zip(self.sep_codes, self.codes, kwargs['field_codes'])]
         _ = sorted(sort_codes, key=operator.itemgetter(*indices))
+
         self.sor_codes = [i[-1] for i in _]
+        if kwargs['field_codes'] is not None:
+            self.id_codes = [i[-2] for i in _]
 
         if kwargs['reverse_order'] is True:
             self.sor_codes.reverse()
+
+
+class MultiGroupHandler(FieldCodeHandler):
+    def __init__(self, groups):
+        self.multi_groups = None
+        super().__init__(groups)
+
+    def group_codes(self, index):
+        # map codes to index
+        groups = {}
+        for c, code in zip(self.sep_codes, self.codes):
+            _g = c[index]  # set multi-group name
+            if _g not in groups:
+                groups[_g] = {}
+            c.pop(index)
+            groups[_g][code] = ' '.join(c)
+        self.multi_groups = groups
 
 
 def load_mask(mask_selection):
@@ -1327,11 +1662,16 @@ def nearest_neighbors(positions):
 
         # create a vector space and find their magnitudes based on the iterative cell position
         vector_lengths = np.sqrt(np.square(cX - cXs) + np.square(cY - cYs))
-        vector_lengths[_id] = max(vector_lengths)  # remove |vector| = 0 from the distance space
-        dist_vectors.append(int(min(vector_lengths)))  # find nearest neighbour and save
+        vector_lengths[_id] = np.inf  # remove |vector| = 0 from the distance space
+        dist_vectors.append(np.int32(vector_lengths.min()))  # find nearest neighbour and save
         _id += 1  # update iterative index
 
     return dist_vectors
+
+
+def vector_length(p1, p2):
+    """For a set of coordinates, finds the length of the vector between two coordinates."""
+    return np.sqrt(np.square(p1[0] - p2[0]) + np.square(p1[1] - p2[1]))
 
 
 def excel_df_push(path, dataframes=None, sheets=None, behavior='update', **kwargs):
@@ -1351,8 +1691,6 @@ def excel_df_push(path, dataframes=None, sheets=None, behavior='update', **kwarg
             for s in sheets:
                 excel_df[s] = pd.read_excel(xlsx_file, sheet_name=s, index_col=0)  # load file as dataframe
                 excel_dict[s] = excel_df[s].to_dict()  # convert each dataframe from each sheet to a dict and pack it
-            # for k, v in excel_df.items():
-            #     excel_dict[k] = v.to_dict()
         else:
             excel_df = pd.read_excel(xlsx_file, index_col=0)
             excel_dict = excel_df.to_dict()  # convert to dict if no sheets

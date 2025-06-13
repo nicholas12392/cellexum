@@ -4,13 +4,14 @@ import base
 from tkinter import filedialog, messagebox, simpledialog
 import os
 import json
-from PIL import Image, ImageTk, ImageOps
+from PIL import Image, ImageTk, ImageOps, ImageFile
 import supports
 import concurrent.futures
 import multiprocessing
 import time
 import cv2
 
+ImageFile.LOAD_TRUNCATED_IMAGES = True  # this allows for loading over SyntaxError: broken PNG file
 
 row_counter = {}
 grid_counter = {}
@@ -37,7 +38,6 @@ def auto_row(p, correction=None, shift=None):
     if shift is not None:  # shift returned row if prompted
         return row_counter[p] + shift
 
-    # print(f'Row number: {row_counter}')
     return row_counter[p]
 
 
@@ -116,14 +116,9 @@ class AppWidget(tk.Widget):
         :param mode: trigger behaviour. Can be '!=' or '=='. The default is '=='.
         """
 
-        # if action is None:  # preset action if none is passed
-        #     action = self.tether_action
-
         self.__internal_data['Tether'] = {'target': target, 'trigger': trigger, 'action': action, 'mode': mode,
                                           'on_action': [], 'on_reset': []}
         self.__internal_data['Cache']['Tether'] = {}  # set up tether cache
-        # self.__tether_cache = {}  # add widget entry in tether cache
-        # self.__tether_activity = False  # add target to activity dict
 
         target.trace_add('write', self.__tether_check)
         self.__tether_check()  # catch trigger from default selection
@@ -345,7 +340,6 @@ class Tooltip(tk.Frame):
         parent.bind('<Leave>', self.__parent_leave)
 
         parent.bind('<Key>', self.__force_forget_tooltip)
-        # print(self)
 
     def __tooltip_enter(self, e):
         self.__state.set(True)
@@ -438,11 +432,9 @@ class ContentFrame(AppFrame):
         super().__init__(parent, *args, **kw)
 
         # Construct canvas and scrollbar in parent frame.
-        self.vscrollbar = vscrollbar = tk.Scrollbar(self, orient='vertical')
-        self.canvas = canvas = AppCanvas(self, bd=0, highlightthickness=0, yscrollcommand=vscrollbar.set)
-        vscrollbar.pack(fill='y', side='right', expand=False)
+
+        self.canvas = canvas = AppCanvas(self, bd=0, highlightthickness=0, )
         canvas.pack(side='left', fill='both', expand=True)
-        vscrollbar.config(command=canvas.yview)
 
         # Set default view.
         canvas.xview_moveto(0)
@@ -451,6 +443,12 @@ class ContentFrame(AppFrame):
         # Construct scrollable frame inside the canvas.
         self.interior = interior = tk.Frame(canvas)
         canvas.create_window(0, 0, window=interior, anchor='nw')
+
+        # construct vertical scrollbar
+        self.vscrollbar = vscrollbar = tk.Scrollbar(canvas, orient='vertical', command=canvas.yview)
+        vscrollbar.pack(fill='y', side='right', expand=True)
+        canvas.config(yscrollcommand=vscrollbar.set)
+        canvas.create_window(0, 0, window=vscrollbar, anchor='ne')  # place scrollbar in canvas
 
         # Bind events to functions.
         canvas.bind('<Configure>', self.__configure_interior)
@@ -470,8 +468,10 @@ class ContentFrame(AppFrame):
         # place or forget scrollbar, depending on the height of the widget compared to the main frame.
         if self.interior.winfo_height() <= self.canvas.winfo_height():
             self.vscrollbar.pack_forget()
+            self.update_idletasks()
         else:
-            self.vscrollbar.pack(fill='y', side='right', expand=False)
+            self.vscrollbar.pack(fill='y', side='right', expand=True)
+            self.update_idletasks()
 
     def __bind_mouse(self, e):
         if self.vscrollbar.winfo_ismapped():  # if vertical scrollbar exists, bind mouse wheel to scrolling.
@@ -481,10 +481,13 @@ class ContentFrame(AppFrame):
         self.canvas.unbind_all("<MouseWheel>")
 
     def __scroll_mouse(self, e):
-        self.canvas.yview_scroll(-1 * int(e.delta / 120), 'units')
-        if self.dv_check('ActiveSelectionMenu') is True:  # clear active selection menu if any
-            if self.dv_get('ActiveSelectionMenu') is True:
-                self.dv_set('ActiveSelectionMenu', False)
+        try:  # a toplevel widget may still occupy focus when closed, this fixes this error report
+            self.canvas.yview_scroll(-1 * int(e.delta / 120), 'units')
+            if self.dv_check('ActiveSelectionMenu') is True:  # clear active selection menu if any
+                if self.dv_get('ActiveSelectionMenu') is True:
+                    self.dv_set('ActiveSelectionMenu', False)
+        except tk.TclError:
+            pass
 
     def refresh_content_frame(self):
         size = (self.interior.winfo_width(), self.interior.winfo_height())  # grab interior size
@@ -524,7 +527,6 @@ class AppButton(AppWidget, tk.Button):
         }
 
         # set size preset
-        auto_width = False
         if size == 'large':
             pars['width'] = 13
         elif size == 'medium':
@@ -535,8 +537,6 @@ class AppButton(AppWidget, tk.Button):
         elif isinstance(size, int):
             pars['width'] = size
         elif not size:
-            # pars['width'] = 6
-            # auto_width = True
             pars['anchor'] = 'center'
         else:
             raise ValueError(f'Invalid size "{size}". Valid options are "large", "medium", "small", or an int')
@@ -554,10 +554,6 @@ class AppButton(AppWidget, tk.Button):
         super().__init__(parent, *args, **kwargs)
 
         self.__bg = kwargs['bg']
-
-        # if auto_width is True:
-        #     print(int(0.65172727 * self.get_fontsize() * len(self['text'])))
-        #     self['width'] = int(0.65172727 * self.get_fontsize() * len(self['text']))
 
         self.bind('<Enter>', self.__on_enter)
         self.bind('<Leave>', self.__on_leave)
@@ -1050,6 +1046,10 @@ class SelectionMenu(AppFrame):
             self.previous = self.current
             self.current = self.get()
 
+    def set_previous(self):
+        """Method that sets the previous selection as the current selection."""
+        self.set(self.previous)
+
     def __mouse_enter(self, e):
         if self['state'] == 'normal':
             self.__label['bg'] = supports.highlight(self.__bg, self.__highlight)
@@ -1163,6 +1163,8 @@ class ZoomImageFrame(AppCanvas):
             if k not in kwargs:
                 kwargs[k] = v
 
+        self._reference_dimensions = (kwargs['width'], kwargs['height'])
+
         super().__init__(parent, *args, **kwargs)
 
         # bind mouse controls to functions
@@ -1193,7 +1195,7 @@ class ZoomImageFrame(AppCanvas):
             self.xview_moveto(self.__init_x)
             self.yview_moveto(self.__init_y)
 
-    def set(self, path, **kwargs):
+    def set_image(self, path, **kwargs):
         """Update set functionality to instead set the image within the canvas."""
 
         self.mtime = os.path.getmtime(path)
@@ -1203,6 +1205,12 @@ class ZoomImageFrame(AppCanvas):
 
         if 'rotate' in kwargs:
             self.img = self.img.rotate(kwargs['rotate'])
+
+        # re-scale the canvas to properly fit the image aspect ratio
+        if self.img.height > self.img.width:
+            self['width'] = self._reference_dimensions[0] * self.img.width / self.img.height
+        else:
+            self['height'] = self._reference_dimensions[1] * self.img.height / self.img.width
 
         # set up tkinter images
         rz_img = ImageOps.contain(self.img, (int(self['width']), int(self['height'])))  # resize image
@@ -1263,8 +1271,6 @@ class AppCheckbutton(AppFrame):
         self.__check.grid(row=0, column=1, padx=3, pady=3, sticky=tk.W)
         self.__label.grid(row=0, column=1, padx=10, sticky=tk.W, pady=0)
 
-        # self.__box.bind('<Button-1>', self.__toggle)
-        # self.__check.bind('<Button-1>', self.__toggle)
         self.trace_add('write', self.__update_check)
         self.__update_check()
         self.__state_check()
@@ -1282,10 +1288,8 @@ class AppCheckbutton(AppFrame):
     def __toggle(self, e):
         if self.get() is True:  # set state to off if on
             self.set(False)
-            # self.__check.grid_remove()
         else:  # set state to on if off
             self.set(True)
-            # self.__check.grid()
 
     def trace_add(self, *args, **kwargs):
         self.selection.trace_add(*args, **kwargs)
@@ -1371,8 +1375,6 @@ class TextCheckbutton(AppLabel):
         self.bind('<Button-1>', self.__toggle)
         self.bind('<Enter>', self.__on_enter)
         self.bind('<Leave>', self.__on_leave)
-        # self.bind('<Control_L>', self.__mouse_press)
-        # self.bind('<ButtonRelease-1>', self.__mouse_release)
 
         self.trace_add('write', self.__style_change)
         self.__style_change()  # update the style according to match the inputted default state
@@ -1387,10 +1389,8 @@ class TextCheckbutton(AppLabel):
         """Internal method that toggles the state of the checkbutton."""
         if self.get() is True:  # set state to off if on
             self.set(False)
-            # self.__off_style()
         else:  # set state to on if off
             self.set(True)
-            # self.__on_style()
 
     def __on_style(self):
         """Internal method that sets the checkbutton style when on."""
@@ -1404,10 +1404,8 @@ class TextCheckbutton(AppLabel):
         """Internal method that changes the style based on the state of the checkbutton."""
         if self.get() is True:
             self.__on_style()
-            # self['text'] = f'{"•": <3}' + self.__name
         else:
             self.__off_style()
-            # self['text'] = f'{"": <3}' + self.__name
 
     def __on_enter(self, e):
         """Internal method that changes the style on mouse-over."""
@@ -1415,10 +1413,6 @@ class TextCheckbutton(AppLabel):
         self.__hover_cache['state'] = self.get()
         self['fg'] = supports.highlight(self.__fg, -40)
         self['cursor'] = 'hand2'
-
-        # # if mouse button 1 is pressed, also toggle the checkbutton state
-        # if self.__mouse_down.get() is True:
-        #     self.__toggle(None)
 
     def __on_leave(self, e):
         """Internal method that changes the style on mouse-out."""
@@ -1605,10 +1599,7 @@ class SelectionGrid(AppFrame):
 
     def __set_selected_fields(self, *_):
         """Internal method that sets the selected_fiels tkvariable"""
-        # _fields = self.get_grid()  # preset a no mask grid
-        # if self.dv_check('ImageMask') is True:  # check if field names can be identified
         mask = base.load_mask_file(self.__mask)
-        # if mask is not None:
         _fields = [mask.iloc[i] for i in self.get_grid()]
         self.selected_fields.set(_fields)
         self.display_fields.set(str(_fields).removeprefix('[').removesuffix(']').replace("'", ''))
@@ -1707,9 +1698,7 @@ class WindowFrame(AppFrame):
                 del _widget['command']
 
         self.__frames[_id] = elem = widget(container, **_widget)  # load widget
-        # def _place():
         elem.grid(**self.__set_grid(**_grid))  # place widget
-        # self.after(5, _place)
         elem.tkID = _id  # set the tkinter ID as the created ID
         elem.tag = tag
         if tooltip is not None:
@@ -1784,12 +1773,19 @@ class WindowFrame(AppFrame):
                 setting_kwargs[k] = kwargs[k]
         return container, grid_kwargs, setting_kwargs, initial_kwargs
 
-    def is_empty(self):
+    def is_empty(self, container=None):
         """Method that checks whether the widget is empty."""
-        if not self.__frames:
-            return True
+        if container is None:
+            if not self.__frames:
+                return True
+            else:
+                return False
         else:
-            return False
+            if not self.containers[container]:
+                return True
+            else:
+                return False
+
 
     def __traces__(self):
         """Placeholder for global traces. To be loaded only after __base__ call and only once for the WindowFrame
@@ -1815,7 +1811,6 @@ class WindowFrame(AppFrame):
     def _remove_class_traces(self, e):
         """Change native behavior to also drop all traces from the class."""
         self.remove_class_traces()
-
 
     def __base__(self):
         """Internal placeholder"""
@@ -1897,7 +1892,10 @@ class WindowFrame(AppFrame):
 
         if elem in self.containers:
             for _ in self.containers[elem]:
-                self.__frames.pop(_)  # remove all contained elements as well
+                try:
+                    self.__frames.pop(_)  # remove all contained elements as well
+                except KeyError:
+                    pass
             self.containers.pop(elem)
 
     def exists(self, elem):
@@ -1931,7 +1929,6 @@ class _EntryGridField(SettingEntry):
         self.__parent = parent
         self.__bg = self['bg']
         self.toggle_memory = self.get()
-        # self.__bg = kwargs['bg']
 
         self.bind('<Enter>', self.__on_enter)
         self.bind('<Leave>', self.__on_leave)
@@ -1940,12 +1937,7 @@ class _EntryGridField(SettingEntry):
         if self.__toggle is True:
             self.bind('<Control-1>', self.__state_toggle)
 
-        # self.bind('<ButtonRelease-1>', self.__disable_active_hover)
-
     def __on_enter(self, e):
-        # if self.__toggle is True and self.__parent.active_hover.get() is True:
-        #     self.__state_toggle(None)
-        # else:
         self['bg'] = supports.highlight(self.__bg, 30)
 
     def __on_leave(self, e):
@@ -1966,7 +1958,6 @@ class _EntryGridField(SettingEntry):
 
     def __state_toggle(self, e):
         """Internal method that toggles the state of the entry."""
-        # self.__parent.active_hover.set(True)
         if self['state'] in ('disabled', tk.DISABLED):
             self['state'] = 'normal'
             self.set(self.toggle_memory)
@@ -1989,7 +1980,6 @@ class EntryGrid(AppFrame):
 
         super().__init__(parent, *args, **kwargs)
 
-        # self.active_hover = tk.BooleanVar(self, False)
         self.__fields = {}
         self.__fkwargs = fkwargs
         self.__grid = None
@@ -2086,11 +2076,11 @@ class EntryGrid(AppFrame):
 class PopupWindow(WindowFrame):
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
-        self.parent.protocol('WM_DELETE_WINDOW', self.cancel_window)  # add cancel window protocol
+        self.winfo_toplevel().protocol('WM_DELETE_WINDOW', self.cancel_window)  # add cancel window protocol
 
     def cancel_window(self):
         """Internal method that destroys popup."""
-        self.parent.destroy()
+        self.winfo_toplevel().destroy()
 
 
 class MaskCreatorWindow(PopupWindow):
@@ -2189,7 +2179,6 @@ class LoadingCircle(AppFrame):
         for _ in ('delay', 'size'):  # clean up kwargs
             del kwargs[_]
 
-        # if 'colors' not in kwargs:
         if aai == 1:
             self.canvas.create_arc(self.coords, **kwargs)
         else:
@@ -2244,6 +2233,15 @@ class TopLevelWidget(tk.Toplevel, TopLevelProperties):
 
         self.dependent_variables['TooltipTimer'] = tk.IntVar(self, self.defaults['TooltipTimer'])
 
+        self.main = _ = ContentFrame(self)
+        _.pack(fill='both', expand=True)
+
+        self.bind('<Configure>', self.update_content_frame)
+
+    def update_content_frame(self, e):
+        self.main.canvas.config(height=self.winfo_height())
+        self.main.refresh_content_frame()
+
 
 class FieldMaskCreator(MaskCreatorWindow):
     def __init__(self, parent, tie, *args, **kwargs):
@@ -2258,10 +2256,13 @@ class FieldMaskCreator(MaskCreatorWindow):
 
     def cancel_window(self):
         """Update cancel window functionality to insert fallback setting."""
-        fallback = self.tie['SelectionMenuImageMask'].previous
-        if fallback == 'Add ...':
-            fallback = self.tie['SelectionMenuImageMask'].default
-        self.tie['SelectionMenuImageMask'].selection.set(fallback)  # set fallback option as selection
+        # define fallback functionality to prevent the 'Add ...' selection to ever be selected as the mask
+        current = self.tie['SelectionMenuImageMask'].get(); previous = self.tie['SelectionMenuImageMask'].previous
+        if current == 'Add ...':
+            if previous == 'Add ...':
+                self.tie['SelectionMenuImageMask'].set(self.tie['SelectionMenuImageMask'].default)
+            else:
+                self.tie['SelectionMenuImageMask'].set(previous)
         super().cancel_window()
 
     def save_mask_bind(self, e):
@@ -2289,6 +2290,20 @@ class FieldProcessingFrame(WindowFrame):
                 self.hide_table_entry(k)
         self.files = _
 
+    def select_missing(self):
+        """Attempt to determine which files are yet to be preprocessed and selected those files for processing."""
+        try:
+            processed = [i.removesuffix('.png') for i in os.listdir(r'{}\_masks for manual control'.format(
+                    self.dv_get('OutputFolder'))) if i.endswith('.png')]
+        except FileNotFoundError:
+            processed = []
+
+        for f in self.dv_get('SelectedFiles'):
+            if f not in processed:
+                self[f'TextCheckbutton:{f}'].set(True)
+            else:
+                self[f'TextCheckbutton:{f}'].set(False)
+
     def show_table_entry(self, file):
         pass
 
@@ -2313,23 +2328,29 @@ class FieldProcessingFrame(WindowFrame):
         if value not in ('Select Option', 'Add ...'):
             supports.post_cache({'PreprocessingSettings': {'ImageMask': value}})
 
+    def preprocess_check(self) -> bool:
+        _continue = True
+        if self['SelectionMenuImageMask'].get() == 'Select Option':
+            messagebox.showerror('Error', "Select an image mask before continuing.", )
+            _continue = False
+        return _continue
+
     @supports.thread_daemon
     def preprocess_daemon(self):
         files = [file for file in self.files if self[f'TextCheckbutton:{file}'].get() is True]  # get active files
         base.RawImageHandler().handle(files)  # handle all images before preprocessing
 
-        futures = []
         with concurrent.futures.ProcessPoolExecutor(max_workers=supports.get_max_cpu(),
                                                     mp_context=multiprocessing.get_context('spawn')) as executor:
-            for file in files:
-                future = executor.submit(base.PreprocessingHandler().preprocess, file)
-                futures.append(future)
-
-            for future, file in zip(concurrent.futures.as_completed(futures), files):
+            futures = {executor.submit(base.PreprocessingHandler().preprocess, file): file for file in files}
+            for future in concurrent.futures.as_completed(futures):
+                file = futures[future]
                 try:
-                    supports.tprint(f'Preprocessed image {future.result()}.')
-                    self.dv_set('CurrentlyPreprocessingFile', future.result())
+                    wpars = future.result()
+                    supports.json_dict_push(r'{}\Settings.json'.format(self.dv_get('OutputFolder')), wpars)
+                    supports.tprint(f'Preprocessed image {file}.')
                     time.sleep(.5)  # avoid overlapping instances that may overload the GUI modules
+                    self.dv_set('LatestPreprocessedFile', file)
                 except Exception as exc:
                     supports.tprint('Failed to preprocess {} with exit: {!r}'.format(file, exc))
                     if self.dv_get('Debugger') is True:

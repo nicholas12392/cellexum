@@ -4,6 +4,8 @@
         "MaxAbsoluteCPU": "",
         "AuditImageResolution": 1150,
         "TooltipTimer": 700,
-        "Debugger": false
+        "Debugger": false,
+        "FilePollingFrequency": 20,
+        "FilePollingTimeOut": 20
     }
 }
