@@ -1,36 +1,67 @@
+from codeop import compile_command
+
 import cv2
 import matplotlib.pyplot as plt
 import matplotlib.lines as mli
 import matplotlib.patches as mpatches
 import pandas as pd
 import numpy as np
+
 import base
 import os
+import draw
 import scipy as sp
 import operator
 from collections.abc import Sequence
 import supports
+from supports import lprint as print
 
 
 class DataAnalysis:
     """Class that handles data analysis for the cellexum application
     :param data: normalized data from the __pretreat_data module in base"""
 
-    def __init__(self, data):
+    def __init__(self, data, repeat):
 
         # set default values for all parameters
-        self.data = data
-        self.dirs = supports.setting_cache()['DirectorySettings']
-        self.__settings = supports.json_dict_push(r'{}\Settings.json'.format(
-            self.dirs['OutputFolder']), behavior='read')  # load settings
-        self.mean_data = None
-        self.groups = None
+        _ = supports.setting_cache()
+        self.dominator = _['DominantRepeat']
+        self._dirs = _['DirectorySettings']
+        self.rdata = _['RepeatData']
+        self.repeat = repeat
+        repeat = repeat if repeat is not None else self.dominator
+        self.dirs = self._dirs[repeat]
+        self.__settings = supports.json_dict_push(rf'{self.dirs["OutputFolder"]}\Settings.json', behavior='read')  # load settings
+
+        if self.repeat is None:  # define parameters for collection analysis
+            self.__write_path = rf'{self._dirs["CommonOutputFolder"]}\_figures'
+            self.mean_dict = {'Collection Data': data['MeanData']}
+            if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
+                self.mean_data = {k: base.craft_collection_dataframe(v) for k, v in data['MeanData'].items()}
+                self.data_sets = {g: {f: base.craft_collection_dataframe(d) for f, d in f_dict.items()} for g, f_dict in
+                                  data['SetData'].items()}
+            else:
+                self.mean_data = {'Collection Data': base.craft_collection_dataframe(data['MeanData'])}
+                self.data_sets = {g: {f: pd.Series(d, name=f) for f, d in f_dict.items()} for g, f_dict in
+                                  data['SetData'].items()}
+
+            self.data = {'Collection Data': data['CollectionData']}
+            self.groups = data['DataGroups']
+
+            self.uc = ' (Collection)'
+        else:  # define parameters for individual analysis
+            self.__write_path = rf'{self.dirs["OutputFolder"]}\_figures'
+            self.mean_dict = None; self.mean_data = None; self.data_sets = None
+            self.groups = None
+            self.data = data
+            self.uc = f' {self.rdata[repeat]["Uncommon"]}' if len(self.rdata) > 1 else ''
+
         self.pmask_settings = None
         self.colors = supports.ColorPresets(self.__settings['CollectionAnalysisSettings']['ColorPreset'])
-        self.__write_path = r'{}\_figures'.format(self.dirs['OutputFolder'])
-        self.mean_dict = None
+
         self.icc = None
         self.additional_data = None
+        self.repeat_groups = supports.json_dict_push(rf'{self.dirs["OutputFolder"]}\_misc\group_links.json', behavior='read')
 
         # check write folder existence
         if not os.path.exists(self.__write_path):
@@ -42,11 +73,11 @@ class DataAnalysis:
             _ = self['CollectionAnalysisSettings']['SampleTypeSettings']['MultiGroup']
 
         if _ == 'None':
-            multi_group = None; mg_groups = 0
+            multi_group = {'MultiGroup': None}; mg_groups = 0
         else:
-            multi_group = supports.json_dict_push(r'{}\_misc\multi_group.json'.format(
-                self.__settings['DirectorySettings']['OutputFolder']), behavior='read')[_]['MultiGroup']
-            mg_groups = {j: n for v in multi_group.values() for n, j in enumerate(v.values())}
+            mg_folder = self._dirs[self.dominator]['OutputFolder']
+            multi_group = supports.json_dict_push(rf'{mg_folder}\_misc\multi_group.json', behavior='read')[_]
+            mg_groups = {j: n for v in multi_group['MultiGroup'].values() for n, j in enumerate(v.values())}
 
         ylabel_dict = {
             'Normalized Cell Count': 'Relative Cell Count',
@@ -65,11 +96,14 @@ class DataAnalysis:
         }
 
         self._pars = {
-            'MG': multi_group,
+            'MG': multi_group['MultiGroup'],
             'MG_GROUPS': mg_groups,
             'FS': self['CollectionAnalysisSettings']['FigureScalar'],
             'Y_LABELS': ylabel_dict,
+            'MG_SETTINGS': multi_group
         }
+
+        self._unit_conversion = {'nm': 1e-3, 'µm': 1, 'mm': 1e3, 'cm': 1e4}
 
     def __getitem__(self, item):
         return self.__settings[item]
@@ -78,10 +112,12 @@ class DataAnalysis:
         """Method that determines data means based on the preset grouping in the application window."""
         data_groups = self['CollectionAnalysisSettings']['DataGroups']
 
+        self.data_sets = {}
         if data_groups:
             group_dict = {}  # construct appendable dict
             for group in data_groups:
                 group_dict[group] = []
+                self.data_sets[group] = {}
 
             for file, member in self['IndividualAnalysisSettings'].items():  # catch group members
                 group = member['DataGroup']
@@ -99,7 +135,8 @@ class DataAnalysis:
                     for t in ('Cell Density', 'Average Cell Area (µm^2/c)', 'Cell Coverage', 'SC Cell Density',
                               'SC Cell Coverage'):
                         try:  # catch missing morphology data
-                            _stds[t][group] = self.data['Collection Data']['Cell Density'].loc[files].std(ddof=1)
+                            _stds[t][group] = self.data['Collection Data'][t].loc[files].std(ddof=1)  # changed second t from Cell Density (note changes)
+                            self.data_sets[group][t] = self.data['Collection Data'][t].loc[files]
                         except KeyError:
                             pass
                 self.mean_data = self.data.copy(); self.mean_data['Collection Data'] = pd.concat(group_means, axis=0)
@@ -107,12 +144,13 @@ class DataAnalysis:
                 for k, v in _stds.items():
                     self.mean_dict[f'{k} Std'] = v
 
-                supports.json_dict_push(r'{}\AnalysisResults.json'.format(self['DirectorySettings']['OutputFolder']),
+                supports.json_dict_push(rf'{self["DirectorySettings"]["OutputFolder"]}\AnalysisResults.json',
                                         {'GroupAnalysis': self.mean_dict}, behavior='update')
 
             elif self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
                 self.mean_data = self.data
-                self.additional_data = {'ControlCount': {}}
+                self.additional_data = {'ControlCount': {}, 'ControlArea': {}, 'ControlDensity': {}}
+                data_dict = {}
                 for sheet in ('Cell Count', 'Normalized Cell Count', 'Area Cell Count', 'Mean Cell Distribution (µm)',
                               'Std Cell Distribution (µm)', 'Average Cell Area (µm^2/c)', 'Cell Coverage',
                               'Normalized Cell Coverage', 'Normalized Cell Area', 'Seeding Score',
@@ -120,22 +158,42 @@ class DataAnalysis:
                     sheet_means = []
                     for group, files in group_dict.items():
                         try:  # catch missing morphology data
-                            sheet_means.append(self.data[sheet][files].mean(axis=1).to_frame(group))
+                            group_data = self.data[sheet][files]
+                            sheet_means.append(group_data.mean(axis=1).to_frame(group))
+                            self.data_sets[group][sheet] = group_data
                         except KeyError:
                             pass
 
                         # save control counts as additional data
-                        _control_counts = []
+                        _control_counts = []; _control_area = []; _control_density = []
                         for file in files:
                             _path = r'{}\{}\data.json'.format(self.__settings['DirectorySettings']['OutputFolder'], file)
                             _data = supports.json_dict_push(_path, behavior='read')['AdditionalData']
                             _control_counts.append(_data['InternalControlCountMean'])
-                        self.additional_data['ControlCount'][group] = np.mean(_control_counts)
+                            _scale = self['PreprocessedParameters'][file]['FieldParameters']['ScaleBar']
+                            _w = (self['PreprocessedParameters'][file]['FieldParameters']['Width'] / _scale -
+                                  self['CollectionProcessSettings']['EdgeProximity'] * 2)  # deduct proximity area
+                            _h = (self['PreprocessedParameters'][file]['FieldParameters']['Height'] / _scale -
+                                  self['CollectionProcessSettings']['EdgeProximity'] * 2)
+                            _area = _w * _h
+                            _control_area.append(_area)
+                            _control_density.append(_data['InternalControlCountMean'] / _area * 1e8)  # /µm^2 -> /cm^2
+
+                        for k, v in zip(('ControlCount', 'ControlArea', 'ControlDensity'),
+                                        (np.mean(_control_counts), np.mean(_control_area), np.mean(_control_density))):
+                            self.additional_data[k][group] = v
 
                     try:  # catch missing sheets from analysis options
                         self.mean_data[sheet] = pd.concat(sheet_means, axis=1)
+                        if sheet != 'Std Cell Distribution (µm)':
+                            data_dict[sheet] = self.mean_data[sheet].to_dict()
                     except ValueError:
                         pass
+                self.mean_dict = data_dict
+
+                supports.json_dict_push(rf'{self["DirectorySettings"]["OutputFolder"]}\AnalysisResults.json',
+                                        {'GroupAnalysis': data_dict, 'ControlParameters': self.additional_data},
+                                        behavior='update')
         else:
             self.mean_data = self.data
 
@@ -192,13 +250,16 @@ class DataAnalysis:
         self.mean_data = temp
 
     def determine_icc(self):
+
         if self['CollectionAnalysisSettings']['MarkIdealCellCount'] is True:
             _mask = self['CollectionPreprocessSettings']['MaskSelection']
             _type = self['CollectionPreprocessSettings']['SampleType']
             _mask_settings = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\masks.json',
                                                      behavior='read')[_type][_mask]
-            if _mask_settings['FieldUnits'] == 'mm':  # rescale to µm if defined units are different
-                _mask_settings['FieldWidth'] *= 1e3; _mask_settings['FieldHeight'] *= 1e3
+
+            # rescale to µm if defined units are different
+            _mask_settings['FieldWidth'] *= self._unit_conversion[_mask_settings['FieldUnits']]
+            _mask_settings['FieldHeight'] *= self._unit_conversion[_mask_settings['FieldUnits']]
             _area = ((_mask_settings['FieldWidth'] - self['CollectionProcessSettings']['EdgeProximity']) *
                      (_mask_settings['FieldHeight'] - self['CollectionProcessSettings']['EdgeProximity']))
 
@@ -209,6 +270,19 @@ class DataAnalysis:
                 self.icc = _icc / _control_mean
             else:
                 self.icc = _icc
+
+    def statistical_analysis(self):
+        """Internal method that determines statistics for the data group with regard to normalized cell count."""
+
+        if self.repeat is None:
+            out = self._dirs["CommonOutputFolder"]
+            settings = supports.json_dict_push(rf'{self.dirs["OutputFolder"]}\Settings.json', behavior='read')
+        else: out = self.dirs['OutputFolder'];
+        out = rf'{out}\_statistics'
+
+        _ = StatisticalAnalysis(self, self.data_sets, self.__settings, self._pars, out)
+        _.analyze()
+
 
     def multi_field_nuclei_analysis(self):
 
@@ -249,12 +323,19 @@ class DataAnalysis:
             # change x-ticks according to the presentation mask settings
             x_ticks = data.index
             if self.pmask_settings['TexMath'] is True:
-                x_ticks = [rf'${e}$' for e in data.index]
+                if self.pmask_settings['NonCursive'] is True:
+                    x_ticks = [r'$\mathrm{%s}$' % e for e in data.index]
+                else:
+                    x_ticks = [rf'${e}$' for e in data.index]
             elif self.pmask_settings['RawString'] is True:
                 x_ticks = [rf'{e}' for e in data.index]
 
             if self.pmask_settings['Numbers'] is True:
                 x_ticks = [float(i) for i in data.index]
+
+            if 'HorizontalAxis' in self.pmask_settings:
+                if self.pmask_settings['HorizontalAxis'] != '':
+                    plt.xlabel(self.pmask_settings['HorizontalAxis'])
 
 
             colors = self.colors.get(data.shape[1])
@@ -265,7 +346,8 @@ class DataAnalysis:
 
                 # construct dummy plot to use as label constructor
                 plot_data = ys[1].to_numpy()
-                plt.plot(x_ticks[0], plot_data[0], label=ys[0], color=c, ms=4, marker='o', lw=0, zorder=-1)
+                plt.plot(x_ticks[0], plot_data[0], label=self.group_editor(ys[0]), color=c, ms=4, marker='o',
+                         lw=0, zorder=-1)
                 plt.plot(x_ticks, plot_data, color=c, ms=4, marker='o', lw=_lw, zorder=1)
 
             if sheet in self._pars['Y_LABELS']:
@@ -276,8 +358,8 @@ class DataAnalysis:
             plt.xticks(rotation=self['CollectionAnalysisSettings']['LabelRotation'],
                        fontsize=self['CollectionAnalysisSettings']['LabelSize'])
             if self.pmask_settings['Numbers'] is True:
-                plt.xlim(.95 * min(x_ticks), 1.05 * max(x_ticks))
-                # plt.xlim(0, 2.4)
+                x_span = max(x_ticks) - min(x_ticks); x_extension = x_span * .01
+                plt.xlim(min(x_ticks) - x_extension, max(x_ticks) + x_extension)
             else:
                 plt.xlim(- len(x_ticks) * .01, len(x_ticks) * 1.01)
 
@@ -315,6 +397,7 @@ class DataAnalysis:
     def single_field_nuclei_analysis(self):
         bar_width = self['CollectionAnalysisSettings']['SampleTypeSettings']['BarWidth']
         data = self.mean_data['Collection Data']
+
         plt.rcParams.update({
             'font.family': self['CollectionAnalysisSettings']['FigureFont']
         })
@@ -323,19 +406,17 @@ class DataAnalysis:
         cell_sheet = 'Normalized Cell Count' if _erg != 'None' else 'Cell Count'
         coverage_sheet = 'Normalized Cell Coverage' if _erg != 'None' else 'Cell Coverage'
 
-        hide_group = None
+        hide_group = []
         if self['CollectionAnalysisSettings']['SampleTypeSettings']['HideExternalReference'] is True and _erg != 'None':
             if self._pars['MG'] is not None:
-                _break = False
-                for k, v in self._pars['MG'].items():
-                    for group in v.keys():
-                        if _erg == group:
-                            hide_group = k
-                            _break = True; break
-                    if _break is True:
-                        break
+                _ = []
+                for elem in self._pars['MG'].values():
+                    for k, v in elem.items():
+                        if v == _erg:
+                            _.append(k)
+                hide_group = _
             else:
-                hide_group = _erg
+                hide_group = [_erg]
 
         sheets = [cell_sheet, 'Mean Cell Distribution (µm)', 'Cell Density', 'Seeding Score']
         if self['CollectionAnalysisSettings']['MorphologyAnalysis'] is True:
@@ -360,60 +441,101 @@ class DataAnalysis:
 
             if self._pars['MG'] is None:
                 for (tick, value), c in zip(_data, colors):
+                    plot_tick = self.group_editor(tick)
                     if sheet in ('Cell Count', 'Normalized Cell Count', 'SC Cell Count'):
-                        if tick != hide_group:
-                            plt.bar(tick, value, color=c, width=bar_width)
+                        if tick not in hide_group:
+                            if self.repeat is None:  # adjust for collection analysis
+                                plt.bar(plot_tick, value, color=c, yerr=self.mean_dict[f'{sheet} Std'][tick],
+                                        ecolor=supports.highlight(c, -20), capsize=4, width=bar_width)
+                            else:
+                                plt.bar(plot_tick, value, color=c, width=bar_width)
                     elif sheet == 'Mean Cell Distribution (µm)':
-                        plt.bar(tick, value, color=c, yerr=data['Std Cell Distribution (µm)'][tick],
-                                ecolor=supports.highlight(c, -20), capsize=4, width=bar_width)
+                        if self.repeat is None:  # adjust for collection analysis
+                            plt.bar(plot_tick, value, color=c, yerr=self.mean_dict[f'{sheet} Std'][tick],
+                                    ecolor=supports.highlight(c, -20), capsize=4, width=bar_width)
+                        else:
+                            plt.bar(plot_tick, value, color=c, yerr=data['Std Cell Distribution (µm)'][tick],
+                                    ecolor=supports.highlight(c, -20), capsize=4, width=bar_width)
                     elif sheet in ('Cell Density', 'SC Cell Density'):
-                        plt.bar(tick, value, color=c, yerr=self.mean_dict[f'{sheet} Std'][tick],
+                        plt.bar(plot_tick, value, color=c, yerr=self.mean_dict[f'{sheet} Std'][tick],
                                 ecolor=supports.highlight(c, -20), capsize=4, width=bar_width)
                     elif sheet in ('Cell Coverage', 'Average Cell Area (µm^2/c)', 'Normalized Cell Coverage',
                                    'Seeding Score', 'SC Cell Coverage', 'SC Normalized Cell Coverage'):
-                        if tick != hide_group:
+                        if tick not in hide_group:
                             _ = []
                             for n in self.groups[tick]:
                                 value = self.data['Collection Data'][sheet][n]
-                                # print(n, value)
-                                plt.plot(tick, value, color=c, ms=4, marker='o', lw=0, alpha=.7)
+                                plt.plot(plot_tick, value, color=c, ms=4, marker='o', lw=0, alpha=.7)
                                 _.append(value)
 
-                            plt.plot(tick, np.mean(_), color=c, marker='_', ms=6, lw=0)
+                            if self.repeat is None:
+                                plt.errorbar(plot_tick, np.mean(_), color=c, marker='_', ms=6, lw=0, capsize=4,
+                                         yerr=self.mean_dict[f'{sheet} Std'][tick], ecolor=supports.highlight(c, -20),
+                                             elinewidth=1)
+                            else:
+                                plt.plot(plot_tick, np.mean(_), color=c, marker='_', ms=6, lw=0)
                             _lh = (mli.Line2D([], [], color='black', label='Individuals', linewidth=0, markersize=4, marker='o'),
                             mli.Line2D([], [], color='black', label='Mean', linewidth=0, markersize=4, marker='_'))
                             plt.legend(frameon=False, handletextpad=0.1, handles=_lh)
             else:
-                if sheet in ('Cell Density', 'SC Cell Density', 'Mean Cell Distribution (µm)',
+                if sheet in ('Cell Density', 'SC Cell Density', 'Mean Cell Distribution (µm)', 'SC Normalized Cell Count',
                                                      'Cell Count', 'Normalized Cell Count', 'SC Cell Count'):
                     offset = 0; label_conversion = {}
                     for (mg, g), c in zip(self._pars['MG'].items(), self.colors.get(len(self._pars['MG']), hex=True)):
                         # collect single-group data from multi-group
-                        if mg != hide_group:
-                            values = []; errors = []; tick_values = []
-                            for k, v in g.items():
-                                try:  # catch zero-member multi-groups
+                        values = []; errors = []; tick_values = []; indexer = 0
+                        for k, v in g.items():
+                            try:  # catch zero-member multi-groups
+                                if k in hide_group and sheet in ('Normalized Cell Count', 'SC Normalized Cell Count'):
+                                    pass
+                                else:
                                     values.append(data[sheet][k])
-                                except KeyError:
-                                    supports.tprint(f'No data for {k}. Skipping group.')
-                                    continue
-                                tick_values.append(self._pars['MG_GROUPS'][v])  # ensure that all values are correctly assigned
+                            except KeyError:
+                                supports.tprint(f'No data for {k}{self.uc}. Skipping group.', branch=2)
+                                continue
 
+                            if k in hide_group and sheet in ('Normalized Cell Count', 'SC Normalized Cell Count'):
+                                indexer = 1
+                            else:
+                                tick_values.append(self._pars["MG_GROUPS"][v] - indexer)  # ensure that all values are correctly assigned
+                                # respect bulk edit settings
+                                label_conversion[v] = self.bulk_editor(v)
+
+                            if self.repeat is not None:
                                 if sheet in ('Cell Density', 'SC Cell Density'):
                                     errors.append(self.mean_dict[f'{sheet} Std'][k])
                                 elif sheet == 'Mean Cell Distribution (µm)':
                                     errors.append(data['Std Cell Distribution (µm)'][k])
-                                label_conversion[v] = v
-                            tick_values = np.array(tick_values) + offset
-                            if sheet in ('Cell Count', 'Normalized Cell Count', 'SC Cell Count'):
-                                plt.bar(tick_values, values, color=c, label=mg, width=bar_width / 2)
+                            elif k in hide_group and sheet in ('Normalized Cell Count', 'SC Normalized Cell Count'):
+                                pass
                             else:
-                                plt.bar(tick_values, values, color=c, label=mg, yerr=errors, width=bar_width / 2,
-                                        ecolor=supports.highlight(c, -20), capsize=4)
-                            offset += bar_width / 2
-                    label_ticks = [i + np.median(np.arange(len(self._pars['MG']))) * bar_width / 2 for i in
-                                   self._pars['MG_GROUPS'].values()]
-                    plt.gca().set_xticks(label_ticks, list(label_conversion.keys()))
+                                errors.append(self.mean_dict['Collection Data'][f'{sheet} Std'][k])
+
+                        tick_values = np.array(tick_values) + offset
+                        if self.repeat is None:
+                            plt.bar(tick_values, values, color=c, label=self._mg_editor(mg), yerr=errors,
+                                    width=bar_width / 2, ecolor=supports.highlight(c, -20), capsize=4)
+                        else:
+                            if sheet in ('Cell Count', 'Normalized Cell Count', 'SC Cell Count', 'SC Normalized Cell Count'):
+                                plt.bar(tick_values, values, color=c, label=self._mg_editor(mg), width=bar_width / 2)
+                            else:
+                                plt.bar(tick_values, values, color=c, label=self._mg_editor(mg), yerr=errors,
+                                        width=bar_width / 2, ecolor=supports.highlight(c, -20), capsize=4)
+                        offset += bar_width / 2
+
+                    if hide_group and sheet in ('Normalized Cell Count', 'SC Normalized Cell Count'):
+                        _ = []; indexer = 0
+                        for k, v in self._pars['MG_GROUPS'].items():
+                            if k != _erg:
+                                _.append(v - indexer)
+                            else:
+                                indexer = 1
+                        label_ticks = [i + np.median(np.arange(len(self._pars['MG']))) * bar_width / 2 for i in _]
+                    else:
+                        label_ticks = [i + np.median(np.arange(len(self._pars['MG']))) * bar_width / 2 for i in
+                                       self._pars['MG_GROUPS'].values()]
+
+                    plt.gca().set_xticks(label_ticks, list(label_conversion.values()))
 
                 elif sheet in ('Cell Coverage', 'Average Cell Area (µm^2/c)', 'Normalized Cell Coverage',
                                'Seeding Score', 'SC Cell Coverage', 'SC Normalized Cell Coverage'):
@@ -422,27 +544,50 @@ class DataAnalysis:
                            mli.Line2D([], [], color='black', label='Mean', linewidth=0, markersize=4, marker='_')]
                     for (mg, g), c in zip(self._pars['MG'].items(), self.colors.get(len(self._pars['MG']), hex=True)):
                         # collect single-group data from multi-group
-                        if mg != hide_group:
-                            for tick, (k, v) in enumerate(g.items()):
-                                label_conversion[v] = v
-                                _ = []
-                                try:  # catch zero-member multi-groups
+                        indexer = 0
+                        for tick, (k, v) in enumerate(g.items()):
+                            _ = []
+                            try:  # catch zero-member multi-groups
+                                if k in hide_group and sheet in ('Normalized Cell Coverage', 'SC Normalized Cell Coverage'):
+                                    indexer = 1
+                                else:
                                     for n in self.groups[k]:
                                         value = self.data['Collection Data'][sheet][n]
-                                        plt.plot(tick + offset, value, color=c, ms=4, marker='o', lw=0, alpha=.7)
+                                        plt.plot(tick + offset - indexer, value, color=c, ms=4, marker='o', lw=0, alpha=.7)
                                         _.append(value)
-                                except KeyError:
-                                    supports.tprint(f'No data for {k}. Skipping group.')
-                                    continue
+                            except KeyError:
+                                supports.tprint(f'No data for {k}{self.uc}. Skipping group.', branch=2)
+                                continue
 
-                                plt.plot(tick + offset, np.mean(_), color=c, marker='_', ms=6, lw=0, label=mg)
-                            _lh.append(mli.Line2D([], [], color=c, label=mg, linewidth=0, markersize=4, marker='s'))
-                            offset += .15
+                            if k in hide_group and sheet in ('Normalized Cell Coverage', 'SC Normalized Cell Coverage'):
+                                indexer = 1
+                            else:
+                                label_conversion[v] = self.bulk_editor(v)
+                                if self.repeat is None:
+                                    plt.errorbar(tick + offset - indexer, np.mean(_), color=c, marker='_', ms=6, lw=0,
+                                             label=self._mg_editor(mg), yerr=np.std(_, ddof=1), elinewidth=1,
+                                             ecolor=supports.highlight(c, -20), capsize=4)
+                                else:
+                                    plt.plot(tick + offset - indexer, np.mean(_), color=c, marker='_', ms=6, lw=0,
+                                             label=self._mg_editor(mg))
+                        _lh.append(mli.Line2D([], [], color=c, label=self._mg_editor(mg), linewidth=0,
+                                              markersize=4, marker='s'))
+                        offset += .15
                     plt.legend(frameon=False, handletextpad=0.1, handles=_lh)
-                    label_ticks = [i + np.median(np.arange(len(self._pars['MG']))) * .15 for i in
-                                   self._pars['MG_GROUPS'].values()]
-                    plt.gca().set_xticks(label_ticks, list(label_conversion.keys()))
 
+                    if hide_group and sheet in ('Normalized Cell Coverage', 'SC Normalized Cell Coverage'):
+                        _ = []; indexer = 0
+                        for k, v in self._pars['MG_GROUPS'].items():
+                            if k != _erg:
+                                _.append(v - indexer)
+                            else:
+                                indexer = 1
+                        label_ticks = [i + np.median(np.arange(len(self._pars['MG']))) * .15 for i in _]
+                    else:
+                        label_ticks = [i + np.median(np.arange(len(self._pars['MG']))) * .15 for i in
+                                       self._pars['MG_GROUPS'].values()]
+
+                    plt.gca().set_xticks(label_ticks, list(label_conversion.values()))
 
             if sheet in self._pars['Y_LABELS']:
                 plt.ylabel(self._pars['Y_LABELS'][sheet])
@@ -456,14 +601,14 @@ class DataAnalysis:
                     plt.legend(frameon=False)
 
             if self.icc is not None:
-                if sheet in ('Cell Count', 'Normalized Cell Count', 'SC Cell Count'):
+                if sheet in ('Cell Count', 'SC Cell Count'):
                     plt.axhline(self.icc, color='k', ls='--', lw=1, label='Seeded', zorder=0)
                     plt.legend(frameon=False)
 
             plt.xticks(rotation=self['CollectionAnalysisSettings']['LabelRotation'],
                        fontsize=self['CollectionAnalysisSettings']['LabelSize'])
             if sheet in ('Cell Count', 'Normalized Cell Count', 'SC Cell Count', 'Cell Density', 'SC Cell Density',
-                         'Mean Cell Distribution (µm)'):
+                         'Mean Cell Distribution (µm)', 'SC Normalized Cell Count'):
                 plt.ylim(bottom=0)  # fix the lower limit to be 0, i.e. prevent stds from clipping the plot
                 if self._pars['MG'] is not None:
                     plt.legend(frameon=False)
@@ -486,6 +631,33 @@ class DataAnalysis:
                 plt.savefig(rf'{na_path}\svg\{sheet}_{mask_name}.svg'.replace(' (µm^2/c)', ''))
                 plt.savefig(rf'{na_path}\{sheet}_{mask_name}.png'.replace(' (µm^2/c)', ''))
             plt.close('all')  # kill all figures on exit
+
+    def bulk_editor(self, name):
+        """Internal method that handles bulk group edit settings."""
+        if self._pars['MG_SETTINGS']['BulkEditSettings']['DataGroupsToMath'] is True:
+            if self._pars['MG_SETTINGS']['BulkEditSettings']['DataGroupsToUpright'] is True:
+                name = r'$\mathrm{%s}$' % name
+            else:
+                name = r'${%s}$' % name
+        return name
+
+    def _mg_editor(self, name):
+        """Internal method that handles bulk editing of multi-group names defined in the settings."""
+        if self._pars['MG_SETTINGS']['MultiGroupSettings']['MultiGroupsToMath'] is True:
+            if self._pars['MG_SETTINGS']['MultiGroupSettings']['MultiGroupsToUpright'] is True:
+                name = r'$\mathrm{%s}$' % name
+            else:
+                name = r'${%s}$' % name
+        return name
+
+    def group_editor(self, name):
+        """Internal method that handles bulk editing of group names."""
+        if self['CollectionAnalysisSettings']['GroupsToMath'] is True:
+            if self['CollectionAnalysisSettings']['UprightMathText'] is True:
+                name = r'$\mathrm{%s}$' % name
+            else:
+                name = r'$%s$' % name
+        return name
 
     def _analyze_model(self, model, np_data, criterion):
 
@@ -547,11 +719,11 @@ class DataAnalysis:
                 except TypeError:
                     _max_bin_reduction += .01
                     if _max_bin_reduction >= round(self['CollectionAnalysisSettings']['ForceFit'] / 100, 2):
-                        _failed = True; supports.tprint(f'Distribution analysis for {n} failed.'); break
-                    supports.tprint('Distribution analysis for {} failed. Retrying without {}% of the largest bins.'.format(
-                        n, int(_max_bin_reduction * 100)))
+                        _failed = True; supports.tprint(f'Distribution analysis for {n}{self.uc} failed.', branch=2); break
+                    supports.tprint('Distribution analysis for {}{} failed. Retrying without {}% of the largest bins.'.format(
+                        self.uc, n, int(_max_bin_reduction * 100)), branch=2)
                 except ValueError:
-                    _failed = True; supports.tprint(f'Distribution analysis for {n} failed.'); break
+                    _failed = True; supports.tprint(f'Distribution analysis for {n}{self.uc} failed.', branch=2); break
 
             if _failed is True:  # skip the rest of the iteration if the fit failed
                 continue
@@ -637,7 +809,7 @@ class DataAnalysis:
             plt.tight_layout(); plt.savefig(rf'{out_path}\{n}\cumulative-{dist}.png')
 
             plt.close('all')
-            supports.tprint(f'Analyzed data from {n}.')
+            supports.tprint(f'Analyzed data from {n}{self.uc}.', branch=2)
 
         # construct overview figures
         plt.figure(figsize=(8 / self._pars['FS'], 3.5 / self._pars['FS']), dpi=self['CollectionAnalysisSettings']['FigureDpi'])
@@ -654,6 +826,14 @@ class DataAnalysis:
         else:
             legend_handles = []
             for (group, members), c in zip(self.groups.items(), self.colors.get(len(self.groups))):
+                if self['CollectionPreprocessSettings']['SampleType'] in ('Single-Field', 'Zero-Field'):
+                    if self._pars['MG'] is None:
+                        group = self.group_editor(group)
+                    else:
+                        pass
+                else:
+                    group = self.group_editor(group)
+
                 legend_handles.append(mli.Line2D([], [], color=c, label=group, linewidth=0, markersize=4,
                                                  marker='o'))  # create label placeholder
                 for n in members:
@@ -694,20 +874,22 @@ class DataAnalysis:
                     try:
                         frozen = model(*np.mean(group_pars, axis=0))  # freeze mean distribution
                     except TypeError:
-                        supports.tprint(f'Failed collection distribution analysis for group {group}.')
+                        supports.tprint(f'Failed collection distribution analysis for group {group}{self.uc}.', branch=2)
                         continue
 
-                    plt.plot(span, frozen.pdf(span), color=c, ms=0, lw=1, label=group)
+                    plt.plot(span, frozen.pdf(span), color=c, ms=0, lw=1, label=self.group_editor(group))
                     _mins.append(min_avg); _maxs.append(max_avg)
             else:
                 # determine how many line styles to generate
                 style_count = len({j for v in self._pars['MG'].values() for j in v.values()})
                 _lh = []; __lh = {}
                 for (mg, g), c in zip(self._pars['MG'].items(), self.colors.get(len(self._pars['MG']), hex=True)):
-                    _lh.append(mli.Line2D([], [], color=c, label=mg, linewidth=0, markersize=4, marker='s'))
+                    _lh.append(mli.Line2D([], [], color=c, label=self._mg_editor(mg), linewidth=0,
+                                          markersize=4, marker='s'))
                     group_pars, __mins, __maxs = [], [], []
                     for (tick, (k, v)), ls in zip(enumerate(g.items()), supports.linestyles(style_count)):
-                        __lh[v] = mli.Line2D([], [], color='black', label=v, linewidth=1, linestyle=ls)
+                        __lh[v] = mli.Line2D([], [], color='black', label=self.bulk_editor(v), linewidth=1,
+                                             linestyle=ls)
 
                         try:
                             for n in self.groups[k]:
@@ -715,7 +897,7 @@ class DataAnalysis:
                                     group_pars.append(results[n]['ModelParameters'])
                                     __mins.append(results[n]['Min']); __maxs.append(results[n]['Max'])
                         except KeyError:
-                            supports.tprint(f'No data for {k}. Skipping group.')
+                            supports.tprint(f'No data for {k}{self.uc}. Skipping group.', branch=2)
                             continue
 
                         min_avg = np.mean(__mins); max_avg = np.mean(__maxs)
@@ -723,7 +905,7 @@ class DataAnalysis:
                         try:
                             frozen = model(*np.mean(group_pars, axis=0))  # freeze mean distribution
                         except TypeError:
-                            supports.tprint(f'Failed collection distribution analysis for group {k}.')
+                            supports.tprint(f'Failed collection distribution analysis for group {k}{self.uc}.', branch=2)
                             continue
 
                         plt.plot(span, frozen.pdf(span), color=c, ms=0, lw=1, linestyle=ls)
@@ -750,15 +932,15 @@ class DataAnalysis:
                     for n in members:
                         if n in results:
                             value = results[n][sheet]
-                            plt.plot(group, value, color=c, ms=4, marker='o', lw=0, alpha=.7)
+                            plt.plot(self.group_editor(group), value, color=c, ms=4, marker='o', lw=0, alpha=.7)
                             _.append(value)
 
-                    plt.plot(group, np.mean(_), color=c, marker='_', ms=6, lw=0)
+                    plt.plot(self.group_editor(group), np.mean(_), color=c, marker='_', ms=6, lw=0)
             else:
                 offset = 0; label_conversion = {}
                 for (mg, g), c in zip(self._pars['MG'].items(), self.colors.get(len(self._pars['MG']), hex=True)):
                     for tick, (k, v) in enumerate(g.items()):
-                        label_conversion[v] = v; _ = []
+                        label_conversion[v] = self.bulk_editor(v); _ = []
                         try:
                             for n in self.groups[k]:
                                 if n in results:  # if the NND analysis failed, skip the current point
@@ -766,14 +948,16 @@ class DataAnalysis:
                                     plt.plot(tick + offset, value, color=c, ms=4, marker='o', lw=0, alpha=.7)
                                     _.append(value)
                         except KeyError:
-                            supports.tprint(f'No data for {k}. Skipping group.')
+                            supports.tprint(f'No data for {k}{self.uc}. Skipping group.', branch=2)
                             continue
 
-                        plt.plot(tick + offset, np.mean(_), color=c, marker='_', ms=6, lw=0, label=mg)
-                    _lh.append(mli.Line2D([], [], color=c, label=mg, linewidth=0, markersize=4, marker='s'))
+                        plt.plot(tick + offset, np.mean(_), color=c, marker='_', ms=6, lw=0,
+                                 label=self._mg_editor(mg))
+                    _lh.append(mli.Line2D([], [], color=c, label=self._mg_editor(mg), linewidth=0,
+                                          markersize=4, marker='s'))
                     offset += .15
                 label_ticks = [i + np.median(np.arange(len(self._pars['MG']))) * .15 for i in self._pars['MG_GROUPS'].values()]
-                plt.gca().set_xticks(label_ticks, list(label_conversion.keys()))
+                plt.gca().set_xticks(label_ticks, list(label_conversion.values()))
 
             plt.ylabel(yl)
             plt.legend(frameon=False, handletextpad=0.1, handles=_lh)
@@ -807,6 +991,358 @@ class DataAnalysis:
         plt.gca().spines['top'].set_visible(False)  # remove top figure border
 
 
+class StatisticalAnalysis:
+    """Class that handles statistical analysis for a data set. Requires functionality from the DataAnalysis class to
+    function as intended."""
+
+    def __init__(self, anchor, data, settings, pars, out):
+        self._anchor = anchor
+        self.data = data
+        self.out = out
+        self.__settings = settings
+        self.__pars = pars
+
+        # define general variables
+        cols = supports.ColorPresets(self.__settings['CollectionAnalysisSettings']['ColorPreset'])
+        if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
+            _ = list(data.values())[0]['Normalized Cell Count']
+            self.colors = cols.get(len(data))
+
+            self.n = _.columns.size
+            self._ctrl = [1, ] * self.n
+            ctrl_name = 'Control'
+            if self['CollectionAnalysisSettings']['SampleTypeSettings']['RenameControl'] != '':
+                ctrl_name = self['CollectionAnalysisSettings']['SampleTypeSettings']['RenameControl']
+            self.ctrl_name = ctrl_name
+
+            mask_name = self['CollectionPreprocessSettings']['MaskSelection']
+            pmask_name = self['CollectionAnalysisSettings']['SampleTypeSettings']['StatisticsPresentationMask']
+            field_sorting = self['CollectionAnalysisSettings']['SampleTypeSettings']['StatisticsFieldSorting']
+            mask = base.load_mask_file(mask_name, strip=True)
+            if self['CollectionAnalysisSettings']['PlotSignificance'] != '':
+                if pmask_name != 'Native':
+                    pmask = base.load_mask_file(rf'presentation_masks\{mask_name}\{pmask_name}', strip=True)
+                else:
+                    pmask = mask
+                pmask_settings = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\presentation_masks.json',
+                                                         behavior='read')[mask_name][pmask_name]
+                mask_ids = {}
+                pmask_field_ids = {}
+                for k, v in pmask_settings['Enabled'].items():
+                    k = base.str_to_tuple(k)
+                    if v is True:
+                        elem = pmask[k]
+                        if pmask_settings['TexMath'] is True:
+                            if pmask_settings['NonCursive'] is True:
+                                elem = r'$\mathrm{%s}$' % elem
+                            else:
+                                elem = rf'${elem}$'
+                        elif pmask_settings['Numbers'] is True:
+                            elem = float(elem)
+                        mask_ids[k] = mask[k]
+                        pmask_field_ids[k] = elem
+
+                if field_sorting != 'None':
+                    sort_settings = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\field_sortings.json',
+                                                            behavior='read')[mask_name][pmask_name][field_sorting]
+                    fc_handler = base.FieldCodeHandler(pmask_field_ids.values())
+                    fc_handler.split_codes(delimiters=sort_settings['Delimiters'], regex=sort_settings['UseRegex'],
+                                           white_space=sort_settings['RecWhiteSpace'],
+                                           separator=sort_settings['MultiLetterSeparator'])
+                    fc_handler.sort_codes(indices=sort_settings['SortingIndices'],
+                                          reverse_order=sort_settings['RevOrder'],
+                                          field_codes=pmask_field_ids)
+                    field_codes = fc_handler.id_codes
+                else:
+                    field_codes = list(pmask_field_ids.keys())
+
+                csv_codes = {}  # strip the index
+                for idx, pcode in pmask_field_ids.items():
+                    if pmask_settings['TexMath'] is True:
+                        if pmask_settings['NonCursive'] is True:
+                            pcode = pcode.lstrip(r'$\mathrm{'); pcode = pcode.rstrip(r'}$')
+                        else:
+                            pcode = pcode.lstrip(r'$'); pcode = pcode.rstrip(r'$')
+                    csv_codes[idx] = pcode
+
+                self.mask_converter = {'IDs': mask_ids, 'SortCodes': field_codes, 'pCodes': pmask_field_ids,
+                                       'csvCodes': csv_codes}
+            self.indices = [ctrl_name] + list(_.index)
+        else:
+            _ = list(data.values())[0]['Cell Density']
+            if self['CollectionAnalysisSettings']['SampleTypeSettings']['MultiGroup'] == 'None':
+                self.colors = cols.get(len(data))
+                self.indices = list(data.keys())
+            else:
+                self.colors = cols.get(len(self.__pars['MG']))
+                self.indices = self.__pars['MG_GROUPS'].keys()
+
+        self.slices = [1, 0.05, 0.01, 0.001, 0.0001]
+
+    def __getitem__(self, item):
+        return self.__settings[item]
+
+    def analyze(self):
+        """Method that wraps the statistical analysis depending on the selected settings in the analysis options."""
+
+        _ps = self['CollectionAnalysisSettings']['PlotSignificance']
+        test_type = self['CollectionAnalysisSettings']['StatisticalTest']; pvals = None; _out = None
+        _out = rf'{self.out}\{test_type}'; base.directory_checker(_out, False)
+
+        if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
+            for (g, d), c in zip(self.data.items(), self.colors):
+                d = d['Normalized Cell Count']
+                unpacked = [self._ctrl]; means = [1]; stds = [0]; s_index = [self.ctrl_name]; _index = [self.ctrl_name]
+                for idx in self.mask_converter['SortCodes']:
+                    points = d.loc[self.mask_converter['IDs'][idx]]
+                    s_index.append(self.mask_converter['csvCodes'][idx])
+                    _index.append(self.mask_converter['IDs'][idx])
+                    unpacked.append(points); means.append(np.mean(points)); stds.append(np.std(points, ddof=1))
+
+                if test_type == 'Tukey\'s HSD':
+                    pvals = self.tukey_hsd(unpacked, s_index, _out, g)
+                elif test_type == 'T-Test':
+                    pvals = self.ttest(unpacked, s_index, _out, g)
+                elif test_type == 'One-Way ANOVA':
+                    pvals = self.one_way_anova(unpacked, s_index, _out, g)
+                if _ps:
+                    self.statistics_plot(means, stds, pvals, _index, d, c, _out, g)
+        else:
+            if self['CollectionAnalysisSettings']['SampleTypeSettings']['MultiGroup'] == 'None':
+                unpacked = []; means = []; stds = []
+                for g, d in self.data.items():
+                    points = d['Cell Density']
+                    unpacked.append(points); means.append(np.mean(points)); stds.append(np.std(points, ddof=1))
+
+                if test_type == 'Tukey\'s HSD':
+                    pvals = self.tukey_hsd(unpacked, self.indices, _out)
+                elif test_type == 'T-Test':
+                    pvals = self.ttest(unpacked, self.indices, _out)
+                elif test_type == 'One-Way ANOVA':
+                    pvals = self.one_way_anova(unpacked, self.indices, _out)
+
+                if _ps:
+                    c_dict = dict(zip(self.indices, self.colors))
+                    self.statistics_plot(means, stds, pvals, self.data, c_dict[_ps], _out)
+            else:
+                for (mg, g), c in zip(self.__pars['MG'].items(), self.colors):
+                    unpacked = []; means = []; stds = []; feed_data = {}
+                    for k, v in g.items():
+                        feed_data[v] = self.data[k]
+                        points = self.data[k]['Cell Density']
+                        unpacked.append(points); means.append(np.mean(points)); stds.append(np.std(points, ddof=1))
+
+                    if test_type == 'Tukey\'s HSD':
+                        pvals = self.tukey_hsd(unpacked, _out, group=mg)
+                    elif test_type == 'T-Test':
+                        pvals = self.ttest(unpacked, _out, group=mg)
+                    elif test_type == 'One-Way ANOVA':
+                        pvals = self.one_way_anova(unpacked, _out, group=mg)
+
+                    if _ps:
+                        self.statistics_plot(means, stds, pvals, self.indices, feed_data, c, _out, g=mg)
+
+    def statistics_plot(self, means, stds, pvals, index, d, c, _out, g=None):
+        """Method that plots data from a statistical analysis"""
+
+        # define scalars
+        _ratio = 65 / len(self.indices)
+        scalars = {
+            's': _ratio * 9,
+            'linewidth': .95 + _ratio * .05,
+            'capsize': 1.5 + _ratio * .5,
+            'elinewidth': .75 + _ratio * .05,
+            'ps': 6 + 10 * _ratio * .4,
+            'p-shift': max(means) * .05 * (.95 + _ratio * .05),
+            'pms': 3.8 + 4 * _ratio * .05
+        }
+
+        _ps = self['CollectionAnalysisSettings']['PlotSignificance']
+        fs = self['CollectionAnalysisSettings']['FigureScalar']
+        fig = plt.figure(figsize=(8 / fs, 3.5 / fs), dpi=self['CollectionAnalysisSettings']['FigureDpi'])
+
+        # generate plot data
+        _means = means; _stds = stds
+        if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
+            _indices = [index[0]]
+            _conversion = _pval_conversion = {index[0]: (index[0], means[0])}
+            for _id, mean in zip(self.mask_converter['SortCodes'], _means[1:]):
+                _indices.append(self.mask_converter['pCodes'][_id])
+                _conversion[self.mask_converter['IDs'][_id]] = (self.mask_converter['pCodes'][_id], mean)
+                _pval_conversion[self.mask_converter['csvCodes'][_id]] = (self.mask_converter['pCodes'][_id], mean)
+        else:
+            _indices = index
+            _conversion = dict(zip(_indices, zip(_indices, means)))
+            _pval_conversion = _conversion
+
+            # respect bulk changes to group names
+            if self['CollectionAnalysisSettings']['SampleTypeSettings']['MultiGroup'] == 'None':
+                _indices = [self._anchor.group_editor(i) for i in _indices]
+            else:
+                _indices = [self._anchor.bulk_editor(i) for i in _indices]
+
+        _dd = self['CollectionAnalysisSettings']['DisplayDetail']
+        if _dd == 'Std':
+            plt.bar(_indices, _means, color=c, yerr=_stds, capsize=scalars['capsize'],
+                    error_kw={'elinewidth': scalars['elinewidth'], 'capthick': scalars['elinewidth']},
+                    ecolor=supports.highlight(supports.rgb_to_hex(c), -20))
+        else:
+            plt.bar(_indices, _means, color=c)
+
+        for code, p in zip(pvals.iloc[0].keys(), pvals[_ps]):
+            if p <= .05 and code in _pval_conversion:
+                x_label, y_label = _pval_conversion[code]
+
+                # respect bulk changes to group names
+                if self['CollectionPreprocessSettings']['SampleType'] in ('Single-Field', 'Zero-Field'):
+                    if self['CollectionAnalysisSettings']['SampleTypeSettings']['MultiGroup'] == 'None':
+                        x_label = self._anchor.group_editor(x_label)
+                    else:
+                        x_label = self._anchor.bulk_editor(x_label)
+
+                plt.scatter(x_label, y_label, marker='|', s=scalars['ps'], color='black', zorder=0)
+                if p <= .0001:
+                    plt.scatter(x_label, y_label + scalars['p-shift'], marker='D', s=scalars['ps'], color='black', zorder=10)
+                elif p <= .001:
+                    plt.scatter(x_label, y_label + scalars['p-shift'], marker='P', s=scalars['ps'], color='black', zorder=10)
+                elif p <= .01:
+                    plt.scatter(x_label, y_label + scalars['p-shift'], marker='v', s=scalars['ps'], color='black', zorder=10)
+                else:
+                    plt.scatter(x_label, y_label + scalars['p-shift'], marker='$*$', s=scalars['ps'], color='black', zorder=10)
+
+        if _dd == 'Data Points':
+            if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
+                plt.scatter(self.indices[0], 1, edgecolors=supports.highlight(supports.rgb_to_hex(c), -20),
+                            facecolor='none', s=scalars['s'], linewidth=scalars['linewidth'], zorder=5, alpha=.5)
+                for idx in d.index:
+                    if idx in _conversion:
+                        values = d.loc[idx]
+                        plt.scatter([_conversion[idx][0], ] * len(values), values, facecolor='none', s=scalars['s'],
+                                    alpha=.5, edgecolors=supports.highlight(supports.rgb_to_hex(c), -20), zorder=5,
+                                    linewidth=scalars['linewidth'])
+            else:
+                for group, values in d.items():
+                    values = values['Cell Density']
+
+                    # respect bulk changes to group names
+                    if self['CollectionPreprocessSettings']['SampleType'] in ('Single-Field', 'Zero-Field'):
+                        if self['CollectionAnalysisSettings']['SampleTypeSettings']['MultiGroup'] == 'None':
+                            group = self._anchor.group_editor(group)
+                        else:
+                            group = self._anchor.bulk_editor(group)
+
+                    plt.scatter([group, ] * len(values), values, facecolor='none', s=scalars['s'], alpha=.5,
+                                linewidth=scalars['linewidth'],
+                                edgecolors=supports.highlight(supports.rgb_to_hex(c), -20), zorder=5)
+
+        # configure plot parameters
+        if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
+            plt.ylabel('Relative Cell Count')
+        else:
+            plt.ylabel('Cell Density [cells cm$^{-2}$]')
+
+        legend_handles = []
+        for pval, stars in zip(self.slices[1:], ('$*$', 'v', 'P', 'D')):
+            legend_handles.append(
+                mli.Line2D([], [], color='black', label=rf'p ≤ {pval}', linewidth=0,
+                           markersize=scalars['pms'], marker=rf'{stars}'))  # create label placeholder
+
+        if self['CollectionAnalysisSettings']['GraphStyle'] == 'Crisp':
+            plt.legend(frameon=True, ncols=4, handletextpad=0.1, facecolor='#ebebeb', edgecolor='#ebebeb',
+                       fancybox=False, loc=1, handles=legend_handles)
+        elif self['CollectionAnalysisSettings']['GraphStyle'] == 'Crisp (No L-Frame)':
+            plt.legend(frameon=False, ncols=4, handletextpad=0.1, handles=legend_handles)
+        plt.xticks(rotation=self['CollectionAnalysisSettings']['StatisticsLabelRotation'],
+                   fontsize=self['CollectionAnalysisSettings']['StatisticsLabelSize'])
+        plt.gca().set_ymargin(.2)
+        plt.tight_layout()
+        plt.gca().spines['right'].set_visible(False)  # remove right figure border
+        plt.gca().spines['top'].set_visible(False)  # remove top figure border
+
+        test_type = self['CollectionAnalysisSettings']['StatisticalTest']
+        if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field':
+            _sorting = self['CollectionAnalysisSettings']['SampleTypeSettings']['StatisticsFieldSorting']
+            plt.savefig(rf'{_out}\{test_type}_{g}_{_ps}_{_dd}_{_sorting}.svg')
+            plt.savefig(rf'{_out}\{test_type}_{g}_{_ps}_{_dd}_{_sorting}.png')
+        else:
+            if self['CollectionAnalysisSettings']['SampleTypeSettings']['MultiGroup'] != 'None':
+                plt.savefig(rf'{_out}\{test_type}_{g}_{_ps}_{_dd}.svg')
+                plt.savefig(rf'{_out}\{test_type}_{g}_{_ps}_{_dd}.png')
+            else:
+                plt.savefig(rf'{_out}\{test_type}_{_ps}_{_dd}.svg')
+                plt.savefig(rf'{_out}\{test_type}_{_ps}_{_dd}.png')
+
+    def tukey_hsd(self, unpacked_data, index, output_folder, group=None):
+        """Method that performs the Tukey HSD method for a data set."""
+
+        t_hsd = sp.stats.tukey_hsd(*unpacked_data)
+        pval_df = pd.DataFrame(np.tril(t_hsd.pvalue), index=index, columns=index)
+        pval_df = pval_df[0 <= pval_df]
+        stat_df = pd.DataFrame(t_hsd.statistic, index=index, columns=index)
+
+        if self['CollectionAnalysisSettings']['ExcelStatistics']:
+            _out = self._group_excel_stat_out(output_folder, "Tukey's HSD", group)
+            base.excel_df_push(_out, dataframes=[pval_df[pval_df <= i] for i in self.slices] + [stat_df],
+                               sheets=[rf'≤ {i}' for i in self.slices] + ['statistic'], behavior='replace')
+
+        return pd.DataFrame(t_hsd.pvalue, index=index, columns=index)
+
+    def ttest(self, unpacked_data, index, output_folder, group=None):
+        """Method that performs the T-Test for a data set."""
+
+        pvals, stats, dfs = [], [], []
+        for row in unpacked_data:
+            _pval_row, _stat_row, _df_row = [], [], []
+            for col in unpacked_data:
+                _ttest = sp.stats.ttest_ind(row, col)
+                _pval_row.append(_ttest.pvalue); _stat_row.append(_ttest.statistic); _df_row.append(_ttest.df)
+            pvals.append(np.array(_pval_row))
+            stats.append(np.array(_stat_row))
+            dfs.append(np.array(_df_row))
+        pval_df = pd.DataFrame(np.tril(pvals), index=index, columns=index)
+        pval_df = pval_df[0 <= pval_df]
+        stat_df = pd.DataFrame(stats, index=index, columns=index)
+        df_df = pd.DataFrame(np.tril(dfs), index=index, columns=index)
+        df_df = df_df[0 <= df_df]
+
+        if self['CollectionAnalysisSettings']['ExcelStatistics']:
+            _out = self._group_excel_stat_out(output_folder, 'T-Test', group)
+            base.excel_df_push(_out, dataframes=[pval_df[pval_df <= i] for i in self.slices] + [stat_df, df_df],
+                               sheets=[rf'≤ {i}' for i in self.slices] + ['statistic', 'df'], behavior='replace')
+
+        return pd.DataFrame(pvals, index=index, columns=index)
+
+    def one_way_anova(self, unpacked_data, index, output_folder, group=None):
+        """Method that performs the one-way ANOVA method for a data set."""
+
+        pvals, stats = [], []
+        for row in unpacked_data:
+            _pval_row, _stat_row = [], []
+            for col in unpacked_data:
+                _stat, _pval = sp.stats.f_oneway(row, col)
+                _pval_row.append(_pval); _stat_row.append(_stat)
+            pvals.append(np.array(_pval_row)); stats.append(np.array(_stat_row))
+        pval_df = pd.DataFrame(np.tril(pvals), index=index, columns=index)
+        pval_df = pval_df[0 <= pval_df]
+        stat_df = pd.DataFrame(stats, index=index, columns=index)
+
+        if self['CollectionAnalysisSettings']['ExcelStatistics']:
+            _out = self._group_excel_stat_out(output_folder, 'One-Way ANOVA', group)
+            base.excel_df_push(_out,
+                               dataframes=[pval_df[pval_df <= i] for i in self.slices] + [stat_df],
+                               sheets=[rf'≤ {i}' for i in self.slices] + ['statistic'], behavior='replace')
+
+        return pd.DataFrame(pvals, index=index, columns=index)
+
+    def _group_excel_stat_out(self, out, stat, group=None):
+        if self['CollectionPreprocessSettings']['SampleType'] == 'Multi-Field' or (
+                self['CollectionPreprocessSettings']['SampleType'] in ('Single-Field', 'Zero-Field') and
+                self['CollectionAnalysisSettings']['SampleTypeSettings']['MultiGroup'] != 'None'):
+            _out = rf'{out}\{stat}_{group}.xlsx'
+        else:
+            _out = rf'{out}\{stat}.xlsx'
+        return _out
+
 class ImageAnalysis:
     """Class that handles image analysis for the Cellexum application."""
 
@@ -833,8 +1369,7 @@ class ImageAnalysis:
         or_name = mask_settings['OrientationReference']['SampleName']
 
         # ensure that all required files are present before running the script
-        channels = base.LoadImage(r'{}\{}.vsi'.format(self.dirs['InputFolder'], or_name))
-
+        channels = base.LoadImage(self.dirs['Repeat:0'], rf'Repeat:0:{or_name}')
         rotation = mask_settings['OrientationReference']['Rotate']
 
         # rotate reference image
@@ -866,7 +1401,7 @@ class ImageAnalysis:
 
     def create_reference_mask_image(self):
         """Method that creates the masked image."""
-        out_dir = r'{}\_misc'.format(self.dirs['OutputFolder'])
+        out_dir = r'{}\_misc'.format(self.dirs['Repeat:0']['OutputFolder'])
         img = cv2.cvtColor(self.mask_channel, cv2.COLOR_GRAY2RGB)
         font_scale = 4 / 8700 * img.shape[1]
 
@@ -895,7 +1430,8 @@ class ImageAnalysis:
         :param channels: the loaded image channels to compare from the LoadImage class in base."""
 
         # import settings
-        settings = supports.json_dict_push(r'{}\Settings.json'.format(self.dirs['OutputFolder']), behavior='read')
+        dirs = channels.dirs
+        settings = supports.json_dict_push(rf'{dirs["OutputFolder"]}\Settings.json', behavior='read')
         mask_settings = supports.json_dict_push(rf'{supports.__cwd__}\__misc__\masks.json',
                                             behavior='read')[settings['CollectionPreprocessSettings']['SampleType']][
             settings['CollectionPreprocessSettings']['MaskSelection']]
@@ -905,6 +1441,7 @@ class ImageAnalysis:
             optimal_rotation = [int(settings['IndividualPreprocessSettings'][channels.metadata['FileName']]['Rotate']),
                                 0, np.nan]
         else:
+            # field_grid = get_point_mask(tbox, mask.point_separation, pars['FieldParameters']['Align'])
             color_dict, _ = get_color_matrix(channels['MaskChannel'], index_mask)
             color_matrix = base.craft_dataframe(color_dict).to_numpy()
             reference_matrix = base.craft_dataframe(
@@ -924,13 +1461,13 @@ class ImageAnalysis:
             'ComparedMatrixUniformity': optimal_rotation[1],  # (lower is better)
             'RotationCertainty': optimal_rotation[2]  # (higher is better)
         }}}}
-        supports.json_dict_push(r'{}\Settings.json'.format(self.dirs['OutputFolder']), params=update_dict,
-                            behavior='update')
+        supports.json_dict_push(rf'{dirs["OutputFolder"]}\Settings.json', params=update_dict, behavior='update')
 
         return optimal_rotation
 
     def rotate_matrix(self, channels, index_mask):
         """Method that rotates the reference orientation matrix."""
+        dirs = channels.dirs
         (h, w) = channels['MaskChannel'].shape[:2]
         (cX, cY) = (w // 2, h // 2)
         font_scale = 3 / 8700 * w
@@ -956,7 +1493,7 @@ class ImageAnalysis:
         rotated_index_mask = dict(zip(tuple(map(tuple, rim_keys)), rim_values))
 
         # write control image for manual evaluation
-        _mask_rotations = r'{}\mask_rotations'.format(r'{}\_misc'.format(self.dirs['OutputFolder']))
+        _mask_rotations = rf'{dirs["OutputFolder"]}\_misc\mask_rotations'
         if not os.path.exists(_mask_rotations):
             os.makedirs(_mask_rotations)
 
@@ -976,7 +1513,7 @@ class ImageAnalysis:
         cv2.putText(_img, 'Red: Mask fields BEFORE rotation', (60, 240),
                     cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 255), 10)
         _img = base.criterion_resize(_img)  # downscale to MaxSize pixels
-        cv2.imwrite(r'{}\{}.png'.format(_mask_rotations, channels.metadata['FileName']), _img)
+        cv2.imwrite(rf'{_mask_rotations}\{channels.metadata["FileName"]}.png', _img)
 
         return rotated_index_mask, rotated_channels
 
@@ -1207,7 +1744,3 @@ class CellDetector:
             centroids = self.connected_component_analysis(self.img['GRAY'], 11, 3, 3)
 
         self.points = centroids
-
-
-
-
