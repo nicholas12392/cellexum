@@ -6,7 +6,6 @@ import pandas as pd
 import numpy as np
 import base
 import os
-import draw
 import scipy as sp
 import operator
 from collections.abc import Sequence
@@ -1741,3 +1740,4 @@ class CellDetector:
             centroids = self.connected_component_analysis(self.img['GRAY'], 11, 3, 3)
 
         self.points = centroids
+
