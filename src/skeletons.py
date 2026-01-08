@@ -10,11 +10,15 @@ import concurrent.futures
 import multiprocessing
 import time
 import cv2
+from functools import partial
+from supports import lprint as print
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True  # this allows for loading over SyntaxError: broken PNG file
 
 row_counter = {}
 grid_counter = {}
+
+
 def auto_row(p, correction=None, shift=None):
     """Function that automatically places widget in the next row. 'p' is the row set. Stalling row update is done by
     placing a '@' in front of 'p'."""
@@ -44,6 +48,7 @@ def auto_row(p, correction=None, shift=None):
 class CommandWrapper:
     """Class that packs functions into a single call. The purpose is to group function calls for tkinter traces to
     allow what is effectively multi-tracing for a single tkinter variable."""
+
     def __init__(self):
         self.callbacks = {}
         self.cbname = None
@@ -71,6 +76,8 @@ class AppWidget(tk.Widget):
         super().__init__(parent, *args, **kwargs)
 
         self.tkID = None  # allow for setting of unique tkinter ids
+        self._all_binds = {}
+        self._individual_binds = {}
 
         # set up protected tether attributes
         self.__tether = {}
@@ -78,7 +85,10 @@ class AppWidget(tk.Widget):
         self.__tether_activity = False
         self.__trigger_activity = False
         self.__internal_data = {'Cache': {}, 'Traces': set()}
-        # self.tether_action = {}
+
+        # accessible attributes to alter for tags and groups used by WindowFrame
+        self.tag = None
+        self.group = None
 
         self.bind('<Button-1>', self.post_self_click, '+')
 
@@ -199,6 +209,26 @@ class AppWidget(tk.Widget):
         else:
             return self.__internal_data['Tether'][var]
 
+    def manipulate_tether(self, entry, value=None):
+        """Method that allows for downstream methods to manipulate a defined tether by directly changing the tether cache.
+        :param entry: Can be dict or a str. If dict, all items in the dict is injected to the tether cache. If str, the
+        str is used to inject that key with an associated value into the cache.
+        :param value: If the entry is a str, this is the injected value into the tether cache."""
+        if isinstance(entry, dict):
+            for k, v in entry.items():
+                self.__internal_data['Cache']['Tether'][k] = v
+        else:
+            self.__internal_data['Cache']['Tether'][entry] = value
+
+    def get_tether_cache(self, entry=None):
+        """Method for obtaining the information contained in the tether cache.
+        :param entry: If None, a dict containing all cached information is retrieved. If a str, cache information about
+        that parameter is returned."""
+        if entry is None:
+            return self.__internal_data['Cache']['Tether']
+        else:
+            return self.__internal_data['Cache']['Tether'][entry]
+
     def set(self, value):
         """Internal placeholder method."""
         pass
@@ -208,7 +238,10 @@ class AppWidget(tk.Widget):
         pass
 
     def tooltip(self, text, *args, **kwargs):
-        self.__internal_data['Tooltip'] = elem = Tooltip(self, text, *args, **kwargs)
+        if 'Tooltip' in self.__internal_data:
+            self.__internal_data['Tooltip'].tt_update(text, *args, **kwargs)
+        else:
+            self.__internal_data['Tooltip'] = Tooltip(self, text, *args, **kwargs)
 
     def get_fontsize(self):
         """Internal method that grabs the font size of widget. This only works if 'font' is a valid kwarg."""
@@ -227,69 +260,175 @@ class AppWidget(tk.Widget):
 
         return font_size
 
-    def dv(self, dv):
+    def dv(self, dv=None, group='', branch=''):
         """Method that can access a globally defined variable."""
-        return self.winfo_toplevel().dependent_variables[dv]
+        if dv is None:  # post the entire dv dict
+            return self.winfo_toplevel().dependent_variables
+        elif dv is True:  # fetch all dv defined under the current group and branch
+            return self.winfo_toplevel().dependent_variables[group][branch]
+        else:  # else fetch the specific variable
+            return self.winfo_toplevel().dependent_variables[group][branch][dv]
 
-    def dv_define(self, dv, var):
+    def dv_define(self, dv, var, group='', branch=''):
         """Method that can define global variables."""
-        self.winfo_toplevel().dependent_variables[dv] = var
+        if group not in self.dv(): self.winfo_toplevel().dependent_variables[group] = {};
+        if branch not in self.dv()[group]: self.winfo_toplevel().dependent_variables[group][branch] = {};
+        self.winfo_toplevel().dependent_variables[group][branch][dv] = var
 
-    def dv_get(self, dv):
+    def dv_remove(self, dv=None, group=None, branch=None):
+        """Method that can remove global variables."""
+        _ = self.winfo_toplevel().dependent_variables
+        if dv is not None:
+            if group is not None:
+                if branch is not None: del _[group][branch][dv];
+                else: del _[group][dv];
+            else: del _[dv];
+        else:
+            if group is not None:
+                if branch is not None: del _[group][branch];
+                else: del _[group];
+            else: _ = {};
+        self.winfo_toplevel().dependent_variables = _
+
+    def dv_get(self, dv=None, group='', branch='', **kwargs):
         """Method that fetches values from global variables"""
-        return self.winfo_toplevel().dependent_variables[dv].get()
 
-    def dv_set(self, dv, value):
-        """Method that sets values for a global variable."""
-        self.winfo_toplevel().dependent_variables[dv].set(value)
+        as_dict = kwargs['as_dict'] if 'as_dict' in kwargs else False
+
+        if branch is not None:
+            if dv is not None:
+                try:
+                    return self.winfo_toplevel().dependent_variables[group][branch][dv].get()
+                except KeyError:  # the likely KeyError cause is that the branch should be None at the call and not ''
+                    """Note that this functionality can be devious. For example, if the sought after dv has not yet been 
+                    defined but surrounding parameters have, dv_get will return a list of results for all OTHER dv than 
+                    the target dv."""
+                    return self.dv_get(dv=dv, group=group, branch=None, **kwargs)
+            else:
+                if as_dict is False:
+                    return [i.get() for i in self.winfo_toplevel().dependent_variables[group][branch].values()]
+                else:
+                    return {k: v.get() for k, v in self.winfo_toplevel().dependent_variables[group][branch].items()}
+        else:
+            if dv is not None:
+                if as_dict is False:
+                    _ = []
+                    for branch in self.winfo_toplevel().dependent_variables[group].values():
+                        try: _.append(branch[dv].get());
+                        except KeyError: pass;
+                else:
+                    _ = {}
+                    for branch, values in self.winfo_toplevel().dependent_variables[group].items():
+                        try: _[branch] = values[dv].get();
+                        except KeyError: pass;
+                return _
+            elif group is not None:
+                # this functionality can only display as a dict
+                _ = {}
+                for branch, b in self.winfo_toplevel().dependent_variables[group].items():
+                    _[branch] = {}
+                    for item, i in b.items():
+                        try: _[branch][item] = i.get();
+                        except KeyError: pass;
+                return _
+
+    def dv_set(self, dv, value, group='', branch='', **kwargs):
+        """Method that sets values for a global variable.
+        :param dv: name of dependent variable to be set.
+        :param value: value to be set.
+        :param group: name of the dv group if any. The default is ''.
+        :param branch: name of the dv branch, if any. The default is ''.
+        :keyword update: if the dv is a DictVar this kwarg can be set to True, which will update the DictVar value,
+        rather than replace it. The default behavior is to replace the DictVar value."""
+
+        kwargs['update'] = kwargs['update'] if 'update' in kwargs else False
+
+        if kwargs['update'] is False:
+            self.winfo_toplevel().dependent_variables[group][branch][dv].set(value)
+        else:
+            self.winfo_toplevel().dependent_variables[group][branch][dv].update(value)
 
     def dv_trace(self, dv, *args, **kwargs):
         """Method that adds a trace to a global variable."""
-        if dv not in self.winfo_toplevel().traces:  # define trace wrapper
-            self.winfo_toplevel().traces[dv] = CommandWrapper()
 
-        if self.winfo_toplevel().traces[dv].cbname is not None:
-            self.dv(dv).trace_remove(self.winfo_toplevel().traces[dv].mode, self.winfo_toplevel().traces[dv].cbname)
+        # construct tree
+        if 'group' in kwargs:
+            group = kwargs['group']
+            del kwargs['group']
+        else: group = '';
 
-        self.winfo_toplevel().traces[dv] + args[1]
+        if 'branch' in kwargs:
+            branch = kwargs['branch']
+            del kwargs['branch']
+        else: branch = '';
+
+        if group not in self.winfo_toplevel().traces: self.winfo_toplevel().traces[group] = {};
+        if branch not in self.winfo_toplevel().traces[group]: self.winfo_toplevel().traces[group][branch] = {};
+        if dv not in self.winfo_toplevel().traces[group][branch]: self.winfo_toplevel().traces[group][branch][
+            dv] = CommandWrapper();
+
+        if self.winfo_toplevel().traces[group][branch][dv].cbname is not None:
+            self.dv(dv, group=group, branch=branch).trace_remove(self.winfo_toplevel().traces[group][branch][dv].mode,
+                                                                 self.winfo_toplevel().traces[group][branch][dv].cbname)
+
+        self.winfo_toplevel().traces[group][branch][dv] + args[1]
         self.__internal_data['Traces'].add(args[1])  # store callback name internally
-        _ = self.dv(dv).trace_add(args[0], self.winfo_toplevel().traces[dv], **kwargs)
-        self.winfo_toplevel().traces[dv].cbname = _; self.winfo_toplevel().traces[dv].mode = args[0]
+        _ = self.dv(dv, group=group, branch=branch).trace_add(args[0],
+                                                              self.winfo_toplevel().traces[group][branch][dv], **kwargs)
+        self.winfo_toplevel().traces[group][branch][dv].cbname = _
+        self.winfo_toplevel().traces[group][branch][dv].mode = args[0]
 
-    def dv_remove_traces(self, dv, *callbacks):
+    def dv_remove_traces(self, dv, *callbacks, **kwargs):
         """Method that removes a trace from a global variable.
         :param dv: dependent variable.
         :param callbacks: callbacks to remove."""
-        if dv in self.winfo_toplevel().traces:
-            if self.winfo_toplevel().traces[dv].cbname is not None:
+
+        group = kwargs['group'] if 'group' in kwargs else ''
+        branch = kwargs['branch'] if 'branch' in kwargs else ''
+
+        try:
+            if self.winfo_toplevel().traces[group][branch][dv].cbname is not None:
                 for cb in callbacks:
-                    self.winfo_toplevel().traces[dv] - cb
+                    self.winfo_toplevel().traces[group][branch][dv] - cb
                     self.__internal_data['Traces'].discard(cb)  # remove callback name internally
 
-                _m = self.winfo_toplevel().traces[dv].mode
-                self.dv(dv).trace_remove(_m, self.winfo_toplevel().traces[dv].cbname)
+                _m = self.winfo_toplevel().traces[group][branch][dv].mode
+                self.dv(dv, group=group, branch=branch).trace_remove(
+                    _m, self.winfo_toplevel().traces[group][branch][dv].cbname)
 
-                _ = self.dv(dv).trace_add(_m, self.winfo_toplevel().traces[dv])
-                self.winfo_toplevel().traces[dv].cbname = _
+                _ = self.dv(dv, group=group, branch=branch).trace_add(
+                    _m, self.winfo_toplevel().traces[group][branch][dv])
+                self.winfo_toplevel().traces[group][branch][dv].cbname = _
+        except KeyError: pass;
 
     def remove_class_traces(self):
         """Method that removes all traces from a class.name."""
-        for k, v in self.winfo_toplevel().traces.items():
-            cbs = [i for i in self.__internal_data['Traces'] if i.__qualname__ in v.callbacks.keys()]
-            self.dv_remove_traces(k, *cbs)
+        for branches in self.winfo_toplevel().traces.values():
+            for traces in branches.values():
+                for k, v in traces.items():
+                    cbs = [i for i in self.__internal_data['Traces'] if i.__qualname__ in v.callbacks.keys()]
+                    self.dv_remove_traces(k, *cbs)
 
-    def dv_check(self, dv):
+    def dv_check(self, dv=None, group=None, branch=None):
         """Method that checks whether a specific global variable has been defined."""
-        if dv in self.winfo_toplevel().dependent_variables:
-            return True
+        if group is not None:
+            if group in self.dv():
+                if branch is not None:
+                    if branch in self.dv()[group]:
+                        if dv is not None:
+                            if dv in self.dv()[group][branch]: return True;
+                            else: return False;
+                        else: return True;
+                    else: return False;
+                else:
+                    if dv is not None:
+                        if dv in self.dv()[group]: return True;
+                        else: return False;
+                    else: return True;
+            else: return False;
         else:
-            return False
-
-    def sample_settings(self):
-        """Method that fetches all sample settings defined in Settings.json. Note that the output folder is required
-        along with a written Settings.json for this method to be functional."""
-        _ = supports.json_dict_push(r'{}\Settings.json'.format(self.dv_get('OutputFolder')), behavior='read')
-        return _
+            if dv in self.dv(): return True;
+            else: return False;
 
     def post_self_click(self, e):
         """Internal method that updates the global last clicked variable on click."""
@@ -299,8 +438,66 @@ class AppWidget(tk.Widget):
     @property
     def __name__(self):
         return type(self).__name__
-        
-        
+
+    def _check_bind_id(self):
+        if self.tkID not in self._all_binds:
+            self._all_binds[self.tkID] = {}
+
+    def bind_all(self, sequence=None, func=None, add=False, *args, **kwargs):
+        """Replacement method for bind_all that allows for the rebind_all method to work."""
+
+        self._check_bind_id()
+        _ = self._all_binds[self.tkID]
+        if sequence in _:
+            if add is False:
+                _[sequence] = [func]
+                super().bind_all(sequence, func, add=False)
+            else:
+                if func not in _[sequence]:  # prevent duplicating function calls
+                    _[sequence] += [func]
+                super().unbind_all(sequence)
+                for v in _[sequence]:
+                    super().bind_all(sequence, v, add=True)
+        else:
+            _[sequence] = [func]
+            super().bind_all(sequence, func)
+        self._all_binds[self.tkID] = _
+
+    def all_binds(self):
+        return self._all_binds
+
+    def unbind_all(self, sequence=None, clear=False):
+        """Replacement method for unbind_all that implements unbinding of the rebind_all functionality."""
+
+        self._check_bind_id()
+        if sequence is not None:
+            super().unbind_all(sequence)
+
+            if clear is True:
+                del self._all_binds[self.tkID][sequence]
+        else:
+            _ = self._all_binds[self.tkID].copy()
+            for k in _:
+                super().unbind_all(k)
+
+                if clear is True:
+                    del self._all_binds[self.tkID][k]
+
+    def rebind_all(self, sequence=None):
+        """Method that rebinds functions to sequences previously defined."""
+
+        self._check_bind_id()
+        _ = self._all_binds[self.tkID]
+        if sequence is not None:
+            if sequence in _:
+                for v in _[sequence]:
+                    self.bind_all(sequence, v, add=True)
+        else:
+            for k, v in _.items():
+                for func in v:
+                    self.bind_all(k, func, add=True)
+
+
 class Tooltip(tk.Frame):
     """Tooltip for cellexum application frames."""
 
@@ -327,6 +524,7 @@ class Tooltip(tk.Frame):
         self.__state = tk.BooleanVar(self, True)
         self.__hover_state = tk.BooleanVar(self)
         self.__has_left = False
+        self.__cursor = None
 
         self.__label = tk.Label(self, text=text, bg=params['bg'], fg=params['fg'], font=params['font'], justify='left')
         self.__label.pack()
@@ -336,10 +534,15 @@ class Tooltip(tk.Frame):
         self.bind('<Enter>', self.__tooltip_enter)
         self.bind('<Leave>', self.__tooltip_leave)
 
-        parent.bind('<Enter>', self.__parent_enter)
-        parent.bind('<Leave>', self.__parent_leave)
+        parent.bind('<Enter>', self.__parent_enter, add=True)
+        parent.bind('<Leave>', self.__parent_leave, add=True)
 
-        parent.bind('<Key>', self.__force_forget_tooltip)
+        self.__label.bind_all('<Key>', self.force_forget_tooltip, add=True)
+
+    def tt_update(self, text):
+        """Method to update the tooltip text."""
+        self.__label.configure(text=text)
+        self.__text = text
 
     def __tooltip_enter(self, e):
         self.__state.set(True)
@@ -352,10 +555,12 @@ class Tooltip(tk.Frame):
             self.after(2, self.__forget_tooltip)
 
     def __parent_enter(self, e):
-        self.__hover_state.set(True)
-        if not self.winfo_ismapped():
-            self.after(self.__params['delay'], self.__place_tooltip)
-        self.__has_left = False
+        # only trigger tooltip if it was not removed by the user in that cursor position
+        if (self.winfo_pointerx(), self.winfo_pointery()) != self.__cursor:
+            self.__hover_state.set(True)
+            if not self.winfo_ismapped():
+                self.after(self.__params['delay'], self.__place_tooltip)
+            self.__has_left = False
 
     def __parent_leave(self, e):
         if self.winfo_ismapped():
@@ -395,15 +600,15 @@ class Tooltip(tk.Frame):
 
             self.place(x=x, y=y)  # place the tooltip
 
-    def __force_forget_tooltip(self, e):
-        print('I should be forgotten')
-        self.__label['bg'] = 'green'
-        print(self)
+    def force_forget_tooltip(self, e):
         self.__tooltip_leave(None)
         self.__parent_leave(None)
+        self.__cursor = (self.winfo_pointerx(), self.winfo_pointery())
+
 
 class AppCanvas(AppWidget, tk.Canvas):
     """Custom canvas widget for the GUI."""
+
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
 
@@ -416,6 +621,7 @@ class AppFrame(AppWidget, tk.Frame):
 
         self.scrollbar = None
         self.dimensions = (self.winfo_width(), self.winfo_height())
+        self.parent = parent
 
         self.bind('<Button-1>', self.__set_focus)
 
@@ -431,14 +637,13 @@ class ContentFrame(AppFrame):
     def __init__(self, parent, *args, **kw):
         super().__init__(parent, *args, **kw)
 
-        # Construct canvas and scrollbar in parent frame.
+        self._memory = {}  # define a memory dict for restoring scroll positions
+        self._scroll_status = False
 
+        # Construct canvas and scrollbar in parent frame.
         self.canvas = canvas = AppCanvas(self, bd=0, highlightthickness=0, )
         canvas.pack(side='left', fill='both', expand=True)
-
-        # Set default view.
-        canvas.xview_moveto(0)
-        canvas.yview_moveto(0)
+        canvas.xview_moveto(0); canvas.yview_moveto(0)  # set default view
 
         # Construct scrollable frame inside the canvas.
         self.interior = interior = tk.Frame(canvas)
@@ -468,22 +673,23 @@ class ContentFrame(AppFrame):
         # place or forget scrollbar, depending on the height of the widget compared to the main frame.
         if self.interior.winfo_height() <= self.canvas.winfo_height():
             self.vscrollbar.pack_forget()
-            self.update_idletasks()
         else:
             self.vscrollbar.pack(fill='y', side='right', expand=True)
-            self.update_idletasks()
+        self.canvas.yview_scroll(-1 * int(e.delta / 120), 'units')
 
     def __bind_mouse(self, e):
         if self.vscrollbar.winfo_ismapped():  # if vertical scrollbar exists, bind mouse wheel to scrolling.
+            self._scroll_status = True
             self.canvas.bind_all("<MouseWheel>", self.__scroll_mouse)
 
     def __unbind_mouse(self, e):
         self.canvas.unbind_all("<MouseWheel>")
+        self._scroll_status = False
 
     def __scroll_mouse(self, e):
         try:  # a toplevel widget may still occupy focus when closed, this fixes this error report
             self.canvas.yview_scroll(-1 * int(e.delta / 120), 'units')
-            if self.dv_check('ActiveSelectionMenu') is True:  # clear active selection menu if any
+            if self.dv_check('ActiveSelectionMenu', '', '') is True:  # clear active selection menu if any
                 if self.dv_get('ActiveSelectionMenu') is True:
                     self.dv_set('ActiveSelectionMenu', False)
         except tk.TclError:
@@ -501,11 +707,25 @@ class ContentFrame(AppFrame):
         else:
             try:  # ideally avoid running code if error would occur instead of just catching it
                 self.vscrollbar.pack(fill='y', side='right', expand=False)
-                self.canvas.bind_all("<MouseWheel>", self.__scroll_mouse)
+                if self._scroll_status is False:
+                    self._scroll_status = True
+                    self.canvas.bind_all("<MouseWheel>", self.__scroll_mouse)
             except tk.TclError:
                 pass
 
         self.__current_interior_size = size
+
+    def set_position_memory(self, name):
+        self._memory[name] = (self.canvas.xview(), self.canvas.yview())
+
+    def get_position_memory(self, name, scroll_region):
+        self.canvas.config(scrollregion=scroll_region)  # set scrollable region
+        if name in self._memory:
+            xview, yview = self._memory[name]
+            xview = xview[0]; yview = yview[0]
+        else:
+            xview = 0; yview = 0
+        self.canvas.xview_moveto(xview); self.canvas.yview_moveto(yview)
 
 
 class AppButton(AppWidget, tk.Button):
@@ -554,7 +774,6 @@ class AppButton(AppWidget, tk.Button):
         super().__init__(parent, *args, **kwargs)
 
         self.__bg = kwargs['bg']
-
         self.bind('<Enter>', self.__on_enter)
         self.bind('<Leave>', self.__on_leave)
 
@@ -627,11 +846,11 @@ class AppEntry(AppWidget, tk.Entry):
         self.default = self.entry.get()  # store the default value
 
         self.tether_action = {
-                        'state': 'disabled',
-                        'selection': self.disabled_selection,
-                        'disabledbackground': supports.__cp__['disabled_bg'],
-                        'disabledforeground': supports.__cp__['disabled_fg']
-                    }
+            'state': 'disabled',
+            'selection': self.disabled_selection,
+            'disabledbackground': supports.__cp__['disabled_bg'],
+            'disabledforeground': supports.__cp__['disabled_fg']
+        }
 
         self.__vartype = kwargs['vartype']
         del kwargs['vartype']  # remove vartype from kwargs before parent call
@@ -690,7 +909,7 @@ class SettingEntry(AppEntry):
 
         del kwargs['activebackground']
 
-        super().__init__(parent,  *args, **kwargs)
+        super().__init__(parent, *args, **kwargs)
 
         self.trace_add('write', self.__on_active)
         self.__on_active()  # check state of entry
@@ -716,7 +935,8 @@ class TextButton(AppWidget, tk.Button):
             'bd': 0,
             'activebackground': supports.__cp__['bg'],
             'activeforeground': supports.__cp__['dark_bg'],
-            'cursor': 'hand2'
+            'cursor': 'hand2',
+            'no_upper': False,
         }
 
         # set data attribute if it exists in kwargs
@@ -740,9 +960,10 @@ class TextButton(AppWidget, tk.Button):
                 kwargs[k] = v
 
         if 'text' in kwargs:  # convert chars to upper case if text is passed
-            kwargs['text'] = kwargs['text'].upper()
+            if kwargs['no_upper'] is False:
+                kwargs['text'] = kwargs['text'].upper()
+        del kwargs['no_upper']
 
-        # print(parameters, kwargs)
         super().__init__(parent, *args, **kwargs)
 
         self.__fg = kwargs['fg']
@@ -757,8 +978,40 @@ class TextButton(AppWidget, tk.Button):
         self['fg'] = self.__fg
 
     def grid(self, *args, **kwargs):
-        if 'pady' not in kwargs: kwargs['pady'] = (0, 5);
+        if 'pady' not in kwargs: kwargs['pady'] = (2, 5);
         super().grid(*args, **kwargs)
+
+    def bold(self):
+        """Method that updates the font to bold."""
+
+        font, restore = self._get_font()
+        if font[-1] != 'bold': font += ['bold'];  # add bold to the font
+
+        if restore:
+            self['font'] = ' '.join(font)  # restore font formatting
+        else:
+            self['font'] = font
+
+    def normal(self):
+        """Method that updates the font to normal."""
+
+        font, restore = self._get_font()
+        if font[-1] == 'bold': font = font[:-1];  # add bold to the font
+
+        if restore:
+            self['font'] = ' '.join(font)  # restore font formatting
+        else:
+            self['font'] = font
+
+    def _get_font(self, res_param=True):
+        font = self['font']  # fetch current font
+        restore = False
+        if isinstance(font, str):
+            font = font.split(' ')  # split font
+            restore = True
+
+        if res_param: return font, restore;
+        else: return font;
 
 
 class AppLabel(AppWidget, tk.Label):
@@ -780,19 +1033,20 @@ class AppLabel(AppWidget, tk.Label):
         super().__init__(parent, *args, **kwargs)
 
     def grid(self, *args, **kwargs):
-        if 'pady' not in kwargs: kwargs['pady'] = (0, 5);
+        if 'pady' not in kwargs: kwargs['pady'] = (2, 5);
         super().grid(*args, **kwargs)
 
 
 class ImageButton(AppLabel):
     """Custom button class for the Cellexum application"""
+
     def __init__(self, parent, image, command=None, *args, **kwargs):
 
         pars = {
             'bg': supports.__cp__['dark_bg'],
-            'fg': supports.__cp__[ 'fg'],
+            'fg': supports.__cp__['fg'],
             'hover': supports.__cp__['bg'],
-            'active': supports.__cp__[ 'dark_fg'],
+            'active': supports.__cp__['dark_fg'],
         }
 
         for k, v in pars.items():
@@ -833,8 +1087,8 @@ class ImageButton(AppLabel):
 
 class ImageMenuButton(ImageButton):
     """Custom button class for the Cellexum application"""
-    def __init__(self, parent, image, frame, *args, **kwargs):
 
+    def __init__(self, parent, image, frame, *args, **kwargs):
         pars = {
             'command': None
         }
@@ -843,7 +1097,6 @@ class ImageMenuButton(ImageButton):
         self.frame = frame
 
         ImageButton.__init__(self, parent, image, *args, **kwargs)
-
 
         self.command = self.update_active_frame  # bind active frame update to command
         self.bind('<Control-1>', self.reload_frame)  # bind Ctrl-Click to frame refresh
@@ -857,6 +1110,7 @@ class ImageMenuButton(ImageButton):
 
 class AppTitle(AppLabel):
     """Custom Title class for the Cellexum application"""
+
     def __init__(self, parent, *args, **kwargs):
         kwargs['font'] = 'Arial 24 bold'
         super().__init__(parent, *args, **kwargs)
@@ -868,6 +1122,7 @@ class AppTitle(AppLabel):
 
 class AppSubtitle(AppLabel):
     """Custom Subtitle class for the Cellexum application"""
+
     def __init__(self, parent, *args, **kwargs):
         kwargs['font'] = 'Arial 18'
         super().__init__(parent, *args, **kwargs)
@@ -879,6 +1134,7 @@ class AppSubtitle(AppLabel):
 
 class AppHeading(AppLabel):
     """Custom Heading class for the Cellexum application"""
+
     def __init__(self, parent, *args, **kwargs):
         kwargs['font'] = 'Arial 12 bold'
         super().__init__(parent, *args, **kwargs)
@@ -887,7 +1143,7 @@ class AppHeading(AppLabel):
         if 'pady' not in kwargs: kwargs['pady'] = 10;
         super().grid(*args, **kwargs)
 
-        
+
 class _SelectionMenuItem(tk.Frame, AppWidget):
     def __init__(self, parent, *args, **kwargs):
         self.command = None
@@ -899,7 +1155,7 @@ class _SelectionMenuItem(tk.Frame, AppWidget):
         self.__bg = kwargs['bg']
         self.__highlight = kwargs['highlight']
         del kwargs['highlight']
-        # del kwargs['width']
+
         kwargs['font'] = 'Arial 12'
         self.label = label = tk.Label(self, **kwargs)
         label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -925,9 +1181,12 @@ class _SelectionMenuItem(tk.Frame, AppWidget):
 
 
 class SelectionMenu(AppFrame):
-    """Costum selection menu for the cellexum application."""
+    """Custom selection menu for the cellexum application."""
+
     def __init__(self, parent, options, default=None, commands=None, *args, **kwargs):
         self.__options = None
+        self.__option_names = options
+        self._commands = commands
         if commands is None:
             commands = {}
         if 'highlight' in kwargs:
@@ -943,10 +1202,16 @@ class SelectionMenu(AppFrame):
             else:
                 kwargs['bg'] = supports.__cp__['dark_bg']
 
+        if 'placeholder' in kwargs:
+            self.placeholder = kwargs['placeholder']
+            del kwargs['placeholder']
+        else:
+            self.placeholder = 'Select Option'
+
         pars = {
             'fg': supports.__cp__['fg'],
             'justify': 'center',
-            'font': 'Arial 12'
+            'font': 'Arial 12',
         }
 
         for k in pars:
@@ -964,8 +1229,8 @@ class SelectionMenu(AppFrame):
         self.selection = tk.StringVar(self)
         self.__hidden_options = list(options)
         if default is None:
-            self.selection.set("Select Option")
-            self.__hidden_options.append('Select Option')
+            self.selection.set(self.placeholder)
+            self.__hidden_options.append(self.placeholder)
         else:
             self.selection.set(options[default])
 
@@ -1009,15 +1274,18 @@ class SelectionMenu(AppFrame):
         self['state'] = 'disabled'
         self['fg'] = supports.__cp__['disabled_fg']
         self['bg'] = supports.__cp__['disabled_bg']
+        self['cursor'] = 'arrow'
         if value is not None:
             self.set(value)
 
-    def enable(self):
+    def enable(self, stall=False):
         self['state'] = 'normal'
+        self['cursor'] = 'hand2'
         self['fg'] = self.__kwargs['fg']
-        self['bg'] = self.__kwargs['bg']
-        if self.current != self.previous:
-            self.set(self.previous)
+        self['bg'] = self.__bg
+        if not stall:
+            if self.current != self.previous:
+                self.set(self.previous)
 
     def label_bind(self, *args, **kwargs):
         return self.__label.bind(*args, **kwargs)
@@ -1062,7 +1330,8 @@ class SelectionMenu(AppFrame):
     def forget_options(self, e):
         for option in self.__options:
             option.place_forget()
-        self.lower()
+        try: self.lower();
+        except tk.TclError: pass;
 
     def place_options(self):
         if self['state'] == 'normal':
@@ -1075,7 +1344,7 @@ class SelectionMenu(AppFrame):
                 shift += option.winfo_reqheight()
 
     def __update_placement(self, *_):
-        if self.active.get() is True:
+        if self.active.get():
             self.place_options()
             self.dv_define('ActiveSelectionMenu', self.active)
         else:
@@ -1083,7 +1352,7 @@ class SelectionMenu(AppFrame):
 
     def toggle(self, e):
         if self['state'] == 'normal':
-            if self.active.get() is True:
+            if self.active.get():
                 self.active.set(False)
             else:
                 # delay the activation setting to avoid getting cleared by the global variable
@@ -1113,8 +1382,8 @@ class SelectionMenu(AppFrame):
         """Internal method that sets up the options in the selection menu."""
         kwargs = self.__kwargs
         self.__options = []
+        kwargs['bg'] = supports.highlight(self.__bg, -20)
         for n, option in enumerate(options):
-            kwargs['bg'] = supports.highlight(self.__bg, -20)
             elem = _SelectionMenuItem(self, text=option, highlight=self.__highlight, **kwargs)
             # permit command allocation both by index and by name
             if n in commands:
@@ -1123,22 +1392,186 @@ class SelectionMenu(AppFrame):
                 elem.command = commands[option]
             self.__options.append(elem)
 
-    def update_options(self, options, commands=None, default=None):
+    def update_options(self, options, commands=None, default=None, force=False):
+        """Method that updates all options in the selection menu, according to the provided options.
+        :params options: the list of options to update.
+        :params commands: dict of commands. If set to None, no option commands will be set. If set to True, reuse the
+        commands from the initial call."""
+
+        self.__hidden_options = list(options)
+        if default is None: self.__hidden_options.append(self.placeholder);
+
+        try:
+            letter_width = max([len(i) for i in self.__hidden_options])
+            self['width'] = letter_width;
+            self.__kwargs['width'] = letter_width
+        except TypeError: pass;
+
+        if self.__option_names != options or force:
+            if commands is None:
+                commands = {}
+            elif commands is True:
+                commands = self._commands
+
+            for e in self.__options:
+                e.destroy()
+
+            self.__set_up_options(options, commands)
+            if default is None:
+                self.set(self.placeholder)
+            else:
+                self.set(default)
+            self.__option_names = options
+
+
+class SelectionEntry(SettingEntry):
+    """Internal class that sets up a setting entry with a dynamic selection menu."""
+
+    def __init__(self, parent, options, default=None, display_number=10, *args, **kwargs):
+        self.__options = None
+        self.__kwargs = kwargs
+        self.__parent = parent
+        self.previous = options
+        self.default = default
+        self.display_number = display_number
+        self.suppress_update = False
+
+        if 'highlight' in kwargs:
+            self.__highlight = kwargs['highlight']
+            del kwargs['highlight']
+        else:
+            self.__highlight = 30
+
+        if 'bg' not in kwargs:
+            if 'background' in kwargs:
+                kwargs['bg'] = kwargs['background']
+                del kwargs['background']
+            else:
+                kwargs['bg'] = supports.__cp__['dark_bg']
+
+        if 'width' not in kwargs:
+            if options:
+                kwargs['width'] = max([len(i) for i in options]) + 1
+
+        kwargs['justify'] = 'center'
+
+        super().__init__(parent, *args, **kwargs)
+
+        if default is not None:
+            self.entry.set(default)
+
+        self.active = tk.BooleanVar(self, False)
+        self.__state = 'normal'  # add a state variable to trigger from tether
+        self.__bg = kwargs['bg']
+
+        self.__set_up_options(options)
+
+        self.bind('<Button-1>', self.open_selection)
+        self.bind('<Escape>', self.close_selection)
+        self.bind_all('<MouseWheel>', self.close_selection)
+        self.bind('<Enter>', self.__mouse_enter)
+        self.bind('<Leave>', self.__mouse_leave)
+        self.active.trace_add('write', self.__update_placement)
+        self.trace_add('write', self.update_options)
+
+        self.tether_action = {'state': 'disabled',
+                              'fg': supports.__cp__['disabled_fg'],
+                              'bg': supports.__cp__['disabled_bg']}
+
+    def __mouse_enter(self, e):
+        if self['state'] == 'normal':
+            self['bg'] = supports.highlight(self.__bg, self.__highlight)
+            self['cursor'] = 'xterm'
+
+    def __mouse_leave(self, e):
+        if self['state'] == 'normal':
+            self['bg'] = self.__bg
+
+    def forget_options(self, e):
+        for option in self.__options:
+            option.place_forget()
+        self.lower()
+
+    def __update_placement(self, *_):
+        if not self.suppress_update:
+            if self.active.get():
+                self.place_options()
+                self.dv_define('ActiveSelectionMenu', self.active)
+            else:
+                self.forget_options(None)
+
+    def update_options(self, *_):
+        if not self.suppress_update:
+            self.forget_options(None)
+            if self.active.get():
+                self.place_options()
+            else:
+                self.after(5, self.active.set, True)
+
+    def __set_up_options(self, options):
+        """Internal method that sets up the options in the selection menu."""
+        kwargs = self.__kwargs
+        self.__options = []
+        for option in options:
+            kwargs['bg'] = supports.highlight(self.__bg, -20)
+            kwargs['fg'] = self['fg'] if 'fg' not in kwargs else kwargs['fg']
+            elem = _SelectionMenuItem(self, text=option, highlight=self.__highlight, **kwargs)
+            self.__options.append(elem)
+
+    def open_selection(self, e):
+        """Internal method that pops open the selection menu part of the entry."""
+        if self['state'] == 'normal':
+            if not self.active.get():
+                # delay the activation setting to avoid getting cleared by the global variable
+                self.after(5, self.active.set, True)
+        else:  # never toggle on the menu if it is disabled
+            self.active.set(False)
+
+    def close_selection(self, e):
+        """Internal method that closes the selection menu part of the entry."""
+        if self.active.get():
+            self.active.set(False)
+
+    def place_options(self):
+        if self['state'] == 'normal':
+            self.tkraise()
+            x = self.winfo_rootx() - self.winfo_toplevel().winfo_rootx()
+            y = self.winfo_rooty() - self.winfo_toplevel().winfo_rooty()
+            shift = self.winfo_reqheight()
+
+            # filter available selections based on current entry typing
+            current_entry = self.get()
+            display_options = []; _options = []
+            for option in self.__options:
+                if option.label['text'].startswith(current_entry):
+                    display_options.append(option)
+                else:
+                    _options.append(option)
+
+            for option in _options:
+                if current_entry in option.label['text']:
+                    display_options.append(option)
+
+            for option in display_options[:self.display_number]:
+                option.place(x=x, y=y + shift)
+                shift += option.winfo_reqheight()
+
+    def replace_options(self, options, default=None):
         """Method that updates all options in the selection menu, according to the provided options.
         :params options: the list of options to update.
         :params commands: dict of commands ."""
 
-        if commands is None:
-            commands = {}
+        if options != self.previous:  # prevent unnecessary updates
+            self.previous = options
+            for e in self.__options:
+                e.destroy()
 
-        for e in self.__options:
-            e.destroy()
-
-        self.__set_up_options(options, commands)
-        if default is None:
-            self.set('Select Option')
-        else:
-            self.set(default)
+            self['width'] = max([len(i) for i in options]) + 1; self.__kwargs['width'] = self['width']
+            self.__set_up_options(options)
+            if default is None:
+                self.set('')
+            else:
+                self.set(default)
 
 
 class ZoomImageFrame(AppCanvas):
@@ -1253,6 +1686,7 @@ class AppCheckbutton(AppFrame):
 
         super().__init__(parent, *args, bg=kwargs['bg'])
 
+        self.previous = default  # allow for storing a previous value
         self.text = text
         self.selection = selection if selection is not None else tk.BooleanVar(self, default)
         self.__kwargs = kwargs  # store kwargs in a variable
@@ -1283,7 +1717,11 @@ class AppCheckbutton(AppFrame):
         return self.selection.get()
 
     def set(self, value):
+        self.previous = self.get()  # store previous value
         self.selection.set(value)
+
+    def set_previous(self):
+        self.set(self.previous)
 
     def __toggle(self, e):
         if self.get() is True:  # set state to off if on
@@ -1319,8 +1757,8 @@ class AppCheckbutton(AppFrame):
             self.__kwargs[key] = self.state.get()  # update state key to match updated value
         elif key == 'checkcolor':
             self.__check['bg'] = value
-        elif key == 'fg':
-            self.__label['fg'] = value
+        elif key in ('fg', 'text'):
+            self.__label[key] = value
 
     def __getitem__(self, key):
         """Adjust the __getitem__ method to yield kwargs setup."""
@@ -1440,6 +1878,37 @@ class JSONVar(tk.StringVar):
         return json.loads(string)
 
 
+class DictVar(JSONVar):
+    """Extension of the JSONVar that adds specific functionality for dictionary variables."""
+
+    def __init__(self, parent, value=None, *args, **kwargs):
+        value = {} if value is None else value
+        super().__init__(parent, value, *args, **kwargs)
+
+    def __setitem__(self, key, value):
+        d = self.get()
+        d[key] = value
+        self.set(d)
+
+    def __getitem__(self, item):
+        return self.get()[item]
+
+    def __delitem__(self, key):
+        d = self.get()
+        del d[key]
+        self.set(d)
+
+    def __contains__(self, item):
+        d = self.get()
+        if item in d: return True;
+        else: return False;
+
+    def update(self, d):
+        _ = self.get()
+        _ = supports.dict_update(_, d)
+        self.set(_)
+
+
 class DirectoryEntry(AppEntry):
     """Internal class that allows user to select a directory with a finder pop-up. The class will catch a cancelled
     operation such that the current real directory is not replaced with an empty directory."""
@@ -1462,7 +1931,15 @@ class DirectoryEntry(AppEntry):
         self.forbidden_folders = kwargs['forbidden']
         del kwargs['forbidden']
 
-        super().__init__(parent,  *args, **kwargs)
+        """Allow for a specific function call on active directory change. Note that this functionality differs from the 
+        regular trace event 'write', as this functionality is only triggered upon user-prompted change of the directory. 
+        It is NOT triggered by the .set() event, which would otherwise trigger the trace."""
+        self.trigger_function = None
+        if 'trigger_function' in kwargs:
+            self.trigger_function = kwargs['trigger_function']
+            del kwargs['trigger_function']
+
+        super().__init__(parent, *args, **kwargs)
 
         self.parent = parent
 
@@ -1470,26 +1947,13 @@ class DirectoryEntry(AppEntry):
         self.bind('<Enter>', self.__on_enter)
 
     def __ask_directory(self, e):
-        _dir = None
-        if self.tkID is not None and self.parent.tkID is not None:
-            _dir_memory = supports.json_dict_push(rf'{supports.__cache__}\directory_memory.json', behavior='read')
-            if self.parent.tkID + self.tkID in _dir_memory:
-                _dir = _dir_memory[self.parent.tkID + self.tkID]
-        select_directory = filedialog.askdirectory(initialdir=_dir)
+        directory = base.configure_directory(self.tkID, self.parent.tkID, forbidden=self.forbidden_folders)
 
-        # catch cancelled selection
-        if select_directory:
-            if select_directory in self.forbidden_folders:
-                supports.tprint(f'Selected directory is restricted.')
-            else:
-                self.set(select_directory)
-                supports.tprint(f'Selected directory: {select_directory}')
-        else:
-            supports.tprint('Directory selection was cancelled.')
+        if directory is not None:
+            self.set(directory)
 
-        if self.tkID is not None and self.parent.tkID is not None:  # update memory if plausible
-            _memory = {self.parent.tkID + self.tkID: select_directory}
-            supports.json_dict_push(rf'{supports.__cache__}\directory_memory.json', params=_memory, behavior='update')
+        if self.trigger_function is not None:
+            self.trigger_function()
 
     def __on_enter(self, e):
         self['cursor'] = 'hand2'
@@ -1607,6 +2071,7 @@ class SelectionGrid(AppFrame):
 
 class WindowFrame(AppFrame):
     """Costum frame class for the cellexum application. This is meant to be used for child classing."""
+
     def __init__(self, parent, name=None, *args, **kwargs):
 
         pars = {'padx': 60,
@@ -1655,7 +2120,7 @@ class WindowFrame(AppFrame):
         if _id in self.__frames:
             if overwrite is True:
                 self.__frames[_id].destroy()
-                self.__frames.pop(_id)
+                del self.__frames[_id]
             else:
                 raise ValueError(f'Widget with id {_id} already exists.')
 
@@ -1671,6 +2136,11 @@ class WindowFrame(AppFrame):
         :param group: add a group to the widget for iterative processing later on. Groups should be reserved for 2D
         variation or more."""
 
+        # fetch hide kwarg if it is passed
+        hide = False
+        if 'hide' in kwargs:
+            hide = kwargs['hide']; del kwargs['hide']
+
         # solve the sid
         if 'text' in kwargs and sid is None:
             sid = kwargs['text'].replace(' ', '')
@@ -1682,12 +2152,12 @@ class WindowFrame(AppFrame):
         # solve tags and groups
         if tag is not None:
             if tag not in self.tags:
-                self.tags[tag] = []
-            self.tags[tag].extend([_id])
+                self.tags[tag] = set()
+            self.tags[tag].add(_id)
         if group is not None:
             if group not in self.groups:
-                self.groups[group] = []
-            self.groups[group].extend([_id])
+                self.groups[group] = set()
+            self.groups[group].add(_id)
 
         warning = None
         if 'warning' in _widget:
@@ -1698,9 +2168,10 @@ class WindowFrame(AppFrame):
                 del _widget['command']
 
         self.__frames[_id] = elem = widget(container, **_widget)  # load widget
+
         elem.grid(**self.__set_grid(**_grid))  # place widget
         elem.tkID = _id  # set the tkinter ID as the created ID
-        elem.tag = tag
+        elem.tag = tag; elem.group = group
         if tooltip is not None:
             if tooltip is True:
                 elem.tooltip(supports.__tt__[self.tkID][_id])
@@ -1720,6 +2191,7 @@ class WindowFrame(AppFrame):
                     prompt = messagebox.askokcancel('Warning', warning)
                     if prompt is True:
                         return command()
+
                 elem.configure(command=_)
 
             def regular_command(e):
@@ -1728,6 +2200,9 @@ class WindowFrame(AppFrame):
 
             elem.bind('<Button-1>', warning_command, '+')
             elem.bind('<Control-1>', regular_command, '+')
+
+        if hide is True:
+            elem.grid_remove()
 
         return elem
 
@@ -1785,7 +2260,6 @@ class WindowFrame(AppFrame):
                 return True
             else:
                 return False
-
 
     def __traces__(self):
         """Placeholder for global traces. To be loaded only after __base__ call and only once for the WindowFrame
@@ -1855,48 +2329,72 @@ class WindowFrame(AppFrame):
         """Method that collects reserved rows under name."""
         return self.__reserved_rows[name]
 
-    def load_settings(self):
-        """Method that loads the settings from the set output directory."""
-        json_path = r'{}\Settings.json'.format(self.dv_get('OutputFolder'))
-        self.settings = supports.json_dict_push(json_path, behavior='read')
+    def load_settings(self, repeat=None):
+        """Method that loads the Settings.json from the set output directory. Specifically, the function reads the json
+        for all loaded repeats, unless repeat is set to either a repeat integer or the Repeat:# structure."""
+
+        if isinstance(repeat, int):
+            repeats = [f'Repeat:{repeat}']
+        elif isinstance(repeat, str):
+            repeats = [repeat]
+        else:
+            repeats = self.dv_get('RepeatData')
+
+        _ = {}
+        for r in repeats:
+            _out = self.dv_get('OutputFolder', group='Directories', branch=r)
+            json_path = rf'{_out}\Settings.json'
+            _[r] = supports.json_dict_push(json_path, behavior='read')
+        self.settings = _
 
     def fetch_ids(self):
         """Method that fetches all produced widget ids."""
         return self.__frames.keys()
 
-    def container_drop(self, container, dtype='destroy', raise_error=False):
-        """Method that allows for dropping all content in a container without removing the container itself.
+    def container_drop(self, container, dtype='destroy', raise_error=False, kill=False):
+        """Method that allows for dropping all content in a container without removing the container itself. Note that
+        this method differs from the regular drop method in that it does not remove the target element, only the
+        children in the container.
         :params container: the container for which elements should be dropped.
-        :params dtype: the drop type. If 'destroy' the containted elements are destroyed and removed from the container
+        :params dtype: the drop type. If 'destroy' the contained elements are destroyed and removed from the container
         entry. If 'remove' the elements are simply removed from the GUI to be recalled later. The default is 'destroy'.
+        :params kill: If set to True, the container itself will be destroyed and cleaned from the container dict.
         """
 
         if container in self.containers:
             if dtype == 'destroy':
                 for elem in self.containers[container]:
-                    self[elem].destroy()  # destroy tkinter widget
-                    self.__frames.pop(elem)  # remove element from frames
+                    self.drop(elem)  # safely destroy tkinter widget
                 self.containers[container] = []  # reset the container entry
-            elif dtype == 'remove':
+            elif dtype == 'remove':  # this functionality is very niche - consider removing
                 for elem in self.containers[container]:
                     self[elem].grid_remove()
+            if kill:
+                del self.containers[container]
+                self.drop(container)
         else:
-            if raise_error is True:
+            if raise_error:
                 raise ValueError(f'Container {container!r} does not exist.')
 
     def drop(self, elem):
         """Method that destroys a widget and its entries."""
         if elem in self.__frames:
-            self[elem].destroy()
-            self.__frames.pop(elem)
+            # check and remove element from tags and groups
+            tag = self[elem].tag; group = self[elem].group
+            if tag is not None: self.tags[tag].remove(elem);
+            if group is not None: self.groups[group].remove(elem);
 
-        if elem in self.containers:
+            # remove the element from tkinter and internally
+            self[elem].destroy()
+            del self.__frames[elem]
+
+        if elem in self.containers:  # ensure proper child removal if the element is a container
             for _ in self.containers[elem]:
                 try:
-                    self.__frames.pop(_)  # remove all contained elements as well
+                    self.drop(_)  # remove all contained elements as well
                 except KeyError:
                     pass
-            self.containers.pop(elem)
+            del self.containers[elem]
 
     def exists(self, elem):
         """Method to check whether a tkID exists within the object."""
@@ -2037,7 +2535,7 @@ class EntryGrid(AppFrame):
         """Method that allows for resetting the entire grid values."""
         for v in self.__fields.values():
             v.set('')
-            
+
     def get_grid_state(self, str_keys=False):
         """Method that allows for fetching the state of each element in the grid. If a field is active, the field value
         is True, otherwise it is False."""
@@ -2050,7 +2548,7 @@ class EntryGrid(AppFrame):
             else:
                 _[k] = False
         return _
-                
+
     def set_grid_state(self, states):
         """Method that allows for setting the state of each element in the grid."""
         for k, v in states.items():
@@ -2070,7 +2568,7 @@ class EntryGrid(AppFrame):
                 if self.__fields[k]['state'] not in ('disabled', tk.DISABLED):
                     self.__fields[k]['state'] = 'disabled'
                     self.__fields[k].toggle_memory = self.__fields[k].get()
-                    self.__fields[k].set('N/A')
+                    self.__fields[k].set('<NA>')
 
 
 class PopupWindow(WindowFrame):
@@ -2158,7 +2656,7 @@ class LoadingCircle(AppFrame):
         self.canvas = tk.Canvas(self, width=pars['size'], height=pars['size'], highlightthickness=0, **kwargs)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.coords = (pars['width'], pars['width'], pars['size']-pars['width'], pars['size']-pars['width'])
+        self.coords = (pars['width'], pars['width'], pars['size'] - pars['width'], pars['size'] - pars['width'])
         self.__pars = pars
         self.__aa_gradient = supports.ColorGradient(onset=kwargs['bg'], end=pars['outline'])
 
@@ -2210,28 +2708,29 @@ class TopLevelProperties:
 
         try:  # load in default values if cache files do not exist
             self.defaults = supports.json_dict_push(rf'{supports.__cache__}\application.json',
-                                    behavior='read')['ApplicationSettings']
+                                                    behavior='read')['ApplicationSettings']
         except KeyError:
             defaults = supports.json_dict_push(rf'{supports.__cwd__}\defaults.json', behavior='read')
             supports.json_dict_push(rf'{supports.__cache__}\application.json', params=defaults, behavior='update')
             self.defaults = defaults['ApplicationSettings']
 
         self.bind('<Button-1>', self.clear_selection_menu)
+        self.bind('<Escape>', self.clear_selection_menu)
 
     def clear_selection_menu(self, e):
-        if 'ActiveSelectionMenu' in self.dependent_variables:
-            if self.dependent_variables['ActiveSelectionMenu'].get() is True:
-                self.dependent_variables['ActiveSelectionMenu'].set(False)
+        if 'ActiveSelectionMenu' in self.dependent_variables['']['']:
+            if self.dependent_variables['']['']['ActiveSelectionMenu'].get() is True:
+                self.dependent_variables['']['']['ActiveSelectionMenu'].set(False)
 
 
 class TopLevelWidget(tk.Toplevel, TopLevelProperties):
     def __init__(self, parent, *args, **kwargs):
         tk.Toplevel.__init__(self, parent, *args, **kwargs)
-        TopLevelProperties.__init__(self, dep_var={  # construct global variable dict
+        TopLevelProperties.__init__(self, dep_var={'': {'': {  # construct global variable dict
             'LastClick': tk.StringVar(self, '')
-        })
+        }}})
 
-        self.dependent_variables['TooltipTimer'] = tk.IntVar(self, self.defaults['TooltipTimer'])
+        self.dependent_variables['']['']['TooltipTimer'] = tk.IntVar(self, self.defaults['TooltipTimer'])
 
         self.main = _ = ContentFrame(self)
         _.pack(fill='both', expand=True)
@@ -2269,46 +2768,170 @@ class FieldMaskCreator(MaskCreatorWindow):
         return self.__save_mask()
 
 
-class FieldProcessingFrame(WindowFrame):
+class BaseProcessingFrame(WindowFrame):
+    def __init__(self, parent, *args, **kwargs):
+        super().__init__(parent, *args, **kwargs)
+
+        self.selected_repeat = 'Repeat:0'
+        self.active_branches = {}
+        self.activation_bypass = True
+        self.active_repeats = []
+        self._folder_change_tt = "Change output folder of selected repeat '%s'. It is currently set to '%s'."
+
+    def hide_table_entry(self, file):
+        for name in self.setting_package(file):
+            if self.exists(name):
+                self[name].grid_remove()
+
+    def show_table_entry(self, file):
+        exists = True
+        for name in self.setting_package(file):
+            if self.exists(name):
+                self[name].grid()
+            else:
+                exists = False
+
+        if not exists:
+            self.add_table_entry(file)
+
+    def remove_table_entry(self, file):
+        for name in self.setting_package(file):
+            if self.exists(name):
+                self.drop(name)
+
+    def update_repeat_selection(self, repeat):
+        self.selected_repeat = repeat
+        for b, branch in self.active_branches.items():
+            for k in branch:
+                if b == repeat:
+                    self.show_table_entry(rf'{b}:{k}')  # ensure that all files exist in the widget space
+                else:
+                    self.hide_table_entry(rf'{b}:{k}')
+
+        if self.exists('ImageButtonChangeFolder'):  # update change folder button tooltip
+            self._update_change_folder_button_tt(repeat)
+
+    def _update_change_folder_button_tt(self, repeat):
+        r_name = self.dv_get('RepeatData')[repeat]['Name']
+        _out = self.dv_get('OutputFolder', group='Directories', branch=repeat)
+        self['ImageButtonChangeFolder'].tooltip(self._folder_change_tt % (r_name, _out))
+
+    def update_repeats(self, *_):
+        """Internal method that updates the repeat functionality."""
+        repeats = self.dv_get('RepeatData')
+        if self.active_repeats != list(repeats.keys()) or self.activation_bypass is True:
+            self['AppFrameRepeatContainer'].grid_remove()
+
+            _ = {}; _active_repeats = []
+            for k, v in repeats.items():
+                _[v['Name']] = partial(self.update_repeat_selection, k)
+                if k not in self.active_repeats:
+                    _active_repeats.append(k)
+
+            if not self.exists('SelectionMenuRepeatSelection'):
+                self.add(AppLabel, text='Repeat: ', sid='RepeatSelection', container='AppFrameRepeatContainer')
+                self.add(SelectionMenu, options=[], sid='RepeatSelection', container='AppFrameRepeatContainer',
+                         prow=True, column=1, padx=(5, 0))
+
+                self.add(ImageButton, sid='ChangeFolder', image='folder', command=self.change_output_folder,
+                         container='AppFrameRepeatContainer', bg=supports.__cp__['bg'],
+                         hover=supports.__cp__['dark_bg'], prow=True, column=2, padx=(10, 0), pady=(5, 0))
+                self._update_change_folder_button_tt(self.selected_repeat)  # add tooltip
+
+            options = tuple(_)
+            self['SelectionMenuRepeatSelection'].update_options(options, commands=_, default=options[0], force=True)
+
+            if len(repeats) > 1:
+                self['AppFrameRepeatContainer'].grid()
+                self.active_repeats = _active_repeats
+            else:  # update default directory entry to match repeat structure
+                self.active_repeats = []
+
+        self.activation_bypass = False  # this ensures that the function is always run when the tab is first loaded in
+
+    def change_output_folder(self):
+        _forbidden = self.dv_get('InputFolder', group='Directories', branch=None, as_dict=True)
+        which = self.selected_repeat
+        directory = base.configure_directory(self.tkID, which, forbidden=_forbidden.keys(),
+                                             forbidden_message='Selected directory is a configured input folder.')
+
+        if directory:
+            # update entries and cache files
+            """There is something else this needs to update as well???"""
+            _ = {_forbidden[which]: {'OutputFolder': directory}}
+            supports.json_dict_push(rf'{supports.__cache__}\saves.json', _, behavior='update')
+
+            _ = {'DirectorySettings': {which: {'OutputFolder': directory}}}
+            supports.json_dict_push(rf'{supports.__cache__}\settings.json', _, behavior='update')
+
+            self.dv_set('OutputFolder', directory, group='Directories', branch=which)
+            self._update_change_folder_button_tt(self.selected_repeat)  # update tooltip during directory change
+
+    @staticmethod
+    def setting_package(file): return [];
+
+    def add_table_entry(self, file): pass;
+
+    @staticmethod
+    def split_file_name(file, r=str):
+        file_repeat, file_name = file.split(':')[1:]
+        file_repeat = file_repeat if r is int else f'Repeat:{file_repeat}'
+        return file_repeat, file_name
+
+
+class FieldProcessingFrame(BaseProcessingFrame):
     def __init__(self, parent, *args, **kwargs):
         kwargs['padx'] = 0; kwargs['pady'] = 0
         super().__init__(parent, *args, **kwargs)
 
         self.files = []
 
-    def __traces__(self):
-        self.dv_trace('SelectedFiles', 'write', self.update_image_settings)
-
     def update_image_settings(self, *_):
         """Internal method that updates setting table."""
-        _ = []
-        for k, v in self.dv_get('SelectedFiles').items():
-            self.show_table_entry(k)  # ensure that all files exist in the widget space
-            if v is True:
-                _.append(k)
-            else:
-                self.hide_table_entry(k)
+        branches = self.dv()['SelectedFiles'].keys()
+        _ = []; active_branches = {}
+        for b in branches:
+            branch_files = self.dv_get(group='SelectedFiles', branch=b, as_dict=True)
+            for k, v in branch_files.items():
+                self.show_table_entry(rf'{b}:{k}')  # ensure that all files exist in the widget space
+                if v is True:
+                    _.append(rf'{b}:{k}')
+                else:
+                    self.hide_table_entry(rf'{b}:{k}')
+
+                try:
+                    if len(branches) > 1:
+                        self[rf'TextCheckbutton:{b}:{k}']['text'] = rf'{k} {self.dv("RepeatData")[b]["Uncommon"]}'
+                    else:
+                        self[rf'TextCheckbutton:{b}:{k}']['text'] = rf'{k}'
+                except KeyError:
+                    self[rf'TextCheckbutton:{b}:{k}']['text'] = rf'{k}'
+            active_branches[b] = branch_files.keys()  # add branch as active
         self.files = _
+
+        for branch, files in self.active_branches.items():
+            if branch not in active_branches:
+                for k in files:
+                    try:
+                        self.remove_table_entry(rf'{branch}:{k}')  # drop entry if its branch has been removed
+                    except KeyError: pass;
+
+        self.active_branches = active_branches  # update the active branches
 
     def select_missing(self):
         """Attempt to determine which files are yet to be preprocessed and selected those files for processing."""
+        repeat_out = self.dv_get('OutputFolder', group='Directories', branch=self.selected_repeat)
         try:
-            processed = [i.removesuffix('.png') for i in os.listdir(r'{}\_masks for manual control'.format(
-                    self.dv_get('OutputFolder'))) if i.endswith('.png')]
+            processed = [i.removesuffix('.png') for i in os.listdir(rf'{repeat_out}\_masks for manual control') if
+                         i.endswith('.png')]
         except FileNotFoundError:
             processed = []
 
-        for f in self.dv_get('SelectedFiles'):
+        for f in self.dv()['SelectedFiles'][self.selected_repeat]:
             if f not in processed:
-                self[f'TextCheckbutton:{f}'].set(True)
+                self[f'TextCheckbutton:{self.selected_repeat}:{f}'].set(True)
             else:
-                self[f'TextCheckbutton:{f}'].set(False)
-
-    def show_table_entry(self, file):
-        pass
-
-    def hide_table_entry(self, file):
-        pass
+                self[f'TextCheckbutton:{self.selected_repeat}:{f}'].set(False)
 
     def update_all(self, e):
         """Internal method that updates all table settings in a column if the last clicked widget was a setting."""
@@ -2321,7 +2944,8 @@ class FieldProcessingFrame(WindowFrame):
 
     def restore_default(self):
         for option in self.groups['ImageSettingsTable']:
-            self[option].set(self[option].default)
+            if option.split(':')[1:3] == self.selected_repeat.split(':'):  # reset only selected repeat
+                self[option].set(self[option].default)
 
     def update_image_mask_cache(self, *_):
         value = self['SelectionMenuImageMask'].get()
@@ -2333,6 +2957,9 @@ class FieldProcessingFrame(WindowFrame):
         if self['SelectionMenuImageMask'].get() == 'Select Option':
             messagebox.showerror('Error', "Select an image mask before continuing.", )
             _continue = False
+        if self.parent['SelectionMenuMaskChannel'].get() == 'Select Option':
+            messagebox.showerror('Error', "Select a mask channel before continuing.", )
+            _continue = False
         return _continue
 
     @supports.thread_daemon
@@ -2340,19 +2967,26 @@ class FieldProcessingFrame(WindowFrame):
         files = [file for file in self.files if self[f'TextCheckbutton:{file}'].get() is True]  # get active files
         base.RawImageHandler().handle(files)  # handle all images before preprocessing
 
+        counter = 1; total = len(files)
         with concurrent.futures.ProcessPoolExecutor(max_workers=supports.get_max_cpu(),
                                                     mp_context=multiprocessing.get_context('spawn')) as executor:
             futures = {executor.submit(base.PreprocessingHandler().preprocess, file): file for file in files}
             for future in concurrent.futures.as_completed(futures):
                 file = futures[future]
+                file_repeat, file_name = file.split(':')[1:]
+                uncommon = self.dv_get("RepeatData")[f"Repeat:{file_repeat}"]["Uncommon"]
+                uncommon = f' {uncommon}' if uncommon is not None else ''
+
                 try:
                     wpars = future.result()
-                    supports.json_dict_push(r'{}\Settings.json'.format(self.dv_get('OutputFolder')), wpars)
-                    supports.tprint(f'Preprocessed image {file}.')
+                    supports.json_dict_push(r'{}\Settings.json'.format(
+                        self.dv_get('OutputFolder', group='Directories', branch=f'Repeat:{file_repeat}')), wpars)
+                    supports.tprint(f'Preprocessed image {file_name}{uncommon} ({counter}/{total}).')
+                    counter += 1
                     time.sleep(.5)  # avoid overlapping instances that may overload the GUI modules
                     self.dv_set('LatestPreprocessedFile', file)
                 except Exception as exc:
-                    supports.tprint('Failed to preprocess {} with exit: {!r}'.format(file, exc))
+                    supports.tprint(f'Failed to preprocess {file_name}{uncommon} with exit: {exc!r}')
                     if self.dv_get('Debugger') is True:
                         raise exc
         supports.tprint('Completed all preprocessing.')
