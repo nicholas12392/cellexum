@@ -2,8 +2,6 @@ import os
 import cv2
 import numpy as np
 import pandas as pd
-from PIL.ImageOps import grayscale
-from pandas.io.sas.sas_constants import subheader_pointers_offset
 
 import analysis
 import re
@@ -2216,3 +2214,4 @@ def define_scalars(scalebar, criterion=1.7, forced_scale=2.5, inverted=False):
     else: scale_ratio = 1;
     scalebar = scalebar if not inverted else scalebar ** -1
     return scalebar, scale_ratio
+
