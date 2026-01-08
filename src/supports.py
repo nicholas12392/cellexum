@@ -7,6 +7,7 @@ import time
 import cv2
 from ctypes import wintypes, windll
 import functools
+import inspect
 
 
 # ATTRIBUTES
@@ -102,6 +103,17 @@ def timer(func):
     return wrapper
 
 
+def milli_timer(func):
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        result = func(*args, **kwargs)
+        end = time.time()
+        diff = end - start
+        tprint(f"Time elapsed for {func.__name__}: {diff*1000:.2f} ms")
+        return result
+    return wrapper
+
+
 def thread_main(func):
     def wrapper(self, *args, **kwargs):
         threading.Thread(target=func, args=(self, *args), kwargs=kwargs, daemon=False).start()
@@ -117,7 +129,7 @@ def post_cache(params: dict, behavior='update'):
     json_dict_push(path, params=params, behavior=behavior)
 
 
-def json_dict_push(path, params=None, behavior='update'):
+def json_dict_push(path, params=None, behavior='update', fetch=False):
     """Poll wrapper for the _json_dict_push function. If the requested file action returns a PermissionError, the script
     will wait poll_timer ms and try polling again until poll_time_out seconds have passed."""
 
@@ -125,7 +137,7 @@ def json_dict_push(path, params=None, behavior='update'):
     while True:
         _runtime = time.time() - start
         try:
-            _ = _json_dict_push(path, params=params, behavior=behavior)
+            _ = _json_dict_push(path, params=params, behavior=behavior, fetch=fetch)
             return _
         except PermissionError:
             time.sleep(__defaults__['FilePollingFrequency'] / 1000)
@@ -141,7 +153,7 @@ def json_dict_push(path, params=None, behavior='update'):
             raise RuntimeError('Polling request for %s timed out.' % path)
 
 
-def _json_dict_push(path, params=None, behavior='update'):
+def _json_dict_push(path, params=None, behavior='update', fetch=False):
     """
     Push json file to disk and overwrite existing variables with new values.
     :param path: Path to json file to be pushed.
@@ -180,6 +192,7 @@ def _json_dict_push(path, params=None, behavior='update'):
                 raise KeyError(f'Invalid behavior: {behavior!r}')
             file.write(json.dumps(json_dict, indent=4, cls=NumpyArrayEncoder))  # write dict to json file
             file.truncate()  # truncate the file before closing
+            if fetch: return json_dict;
         else:  # return existing dict
             return data
 
@@ -205,7 +218,7 @@ def setting_cache(*args, clear_entry=False, replace=None):
         return cache
 
     v, t = dict_trail(cache, *args, _vd=replace)
-    if clear_entry is True:
+    if clear_entry:
         json_dict_push(path, params=t, behavior='update')
     return v
 
@@ -228,14 +241,21 @@ def dict_trail(d, *args, _vd=None, _i=0):
             return value, trail
 
 
-def tprint(text) -> None:
+def tprint(text, branch=0) -> None:
     """
     Print the time in front of the printed message.
     :param text: The text to be printed.
     :return: Prints the text along with the current time.
     """
     time_stamp = time.localtime()
-    print(f'{time.strftime("%H:%M", time_stamp)} - {text}')
+    if branch == 0:
+        print(f'{time.strftime("%H:%M", time_stamp)} - {text}')
+    else:
+        branches = ''
+        for i in range(branch):
+            branches += '---'
+        print(f'{time.strftime("%H:%M", time_stamp)} - {branches} | {text}')
+
 
 
 def hex_to_rgb(hex: str) -> tuple[int, ...]:
@@ -432,3 +452,23 @@ def linestyles(n):
             stype = 1; multiplier += 1
     return styles
 
+
+def lprint(*message, no_content=False):
+    """Debugging function used to easily identify where debugging print statements were added."""
+    frame = inspect.currentframe()
+    file = frame.f_back.f_code.co_filename.split(os.sep)[-1].rstrip('.py')
+    if len(message) > 1:
+        print(rf'{file} - {frame.f_back.f_lineno}: {message}')
+    else:
+        try:
+            print(rf'{file} - {frame.f_back.f_lineno}: {message[0]}')
+        except IndexError:
+            if not no_content:
+                print(rf'{file} - {frame.f_back.f_lineno}: Message has no content.')
+
+
+def show_image(image, ms=10, scale=.1, name='Image'):
+    """Show an image."""
+    rz = cv2.resize(image, (0, 0), fx=scale, fy=scale)
+    cv2.imshow(name, rz)
+    cv2.waitKey(ms)
